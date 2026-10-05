@@ -1,0 +1,101 @@
+# Copy to your project root as `pipeline.toml`.
+#
+# This file is the ONLY place project-specific detail belongs. The toolkit in
+# agent-pipeline/ has no project names, paths, or step lists in it. Every
+# setting below is optional — a project with no pipeline.toml still works on
+# generic defaults.
+
+[project]
+# Display name in the dashboard and CLI. Default: the project directory name.
+name = "tracewell"
+
+# Where the orchestrator writes per-run artifacts, relative to this file.
+# Default: ".scratch"
+run_dir = ".scratch"
+
+# Run-status file inside a run directory. Default: "pipeline-status.md"
+status_file = "pipeline-status.md"
+
+# Run-dir subdirectories to skip when listing artifacts (binary/noise).
+# Default: ["screenshots"]
+ignore_dirs = ["screenshots"]
+
+# Regex matching this project's issue keys. This is the join: a run directory
+# and the sessions that worked it are grouped under the key found in each, so
+# `pipeline resume <KEY>` can summarise a task that spanned several sessions.
+# Default: [A-Z][A-Z0-9]{1,9}-\d+  (matches JIRA-style keys such as ABC-123)
+task_pattern = "TW-\\d+"
+
+# --- Sections below are read by the agents (agents/*.md), not the toolkit. ---
+# All optional. When a section or key is blank, the relevant agent asks you
+# for that fact the first time it needs it, instead of guessing or assuming
+# a specific project's values.
+
+# Ticket system agents fetch tickets from and file bugs to.
+[project.tickets]
+provider = "trello"
+board_id = "6ac41d2af52a1a21a0cdb2a7"
+board_url = "https://trello.com/b/PCh8SHQQ/tracewell"
+api_base = "https://api.trello.com/1"
+key_env = "TRELLO_API_KEY"
+token_env = "TRELLO_ACCESS_TOKEN"
+lists = { todo = "6ac41d3093ba0b67b251a24a", in_progress = "6ac41d30e296f23be4116b47", done = "6ac41d31f2cb2b17abfcd62a" }
+
+# Trello has no native custom-ID field, so task keys are a prefix we add to
+# each card title ourselves: "TW-<next_number> <card title>". Bump
+# next_number every time a card is created so keys stay sequential and unique.
+key_prefix = "TW"
+next_number = 1
+
+# Tech stack and commands the developer/tester agents need to build, run,
+# and test this project.
+[project.stack]
+backend = "Django + Django REST Framework, SQLite for dev, local filesystem storage for run attachments (traces/screenshots/videos)"
+frontend = "React (JSX via Vite), reusing the Tracewell design-system components as-is"
+test_command = "cd backend && python manage.py test; cd frontend && npm test -- --run"
+run_command = "cd backend && python manage.py runserver 8000 & cd frontend && npm run dev -- --port 5173"
+
+# A design-system project (e.g. Claude Design) the @uxdesigner agent composes
+# screens against. No generic default exists — leave blank and it will ask.
+[project.design]
+project_id = "185751a1-8510-4c63-b39d-56151bb6c89f"  # "Tracewell Design System" on Claude Design
+url = ""  # fill in once you have the project's claude.ai/design URL — uxdesigner falls back to project_id via DesignSync if blank
+
+# Definition-of-Done checklist items enforced at the end of the pipeline
+# (e.g. changelog entry, docs updates). Leave empty and the orchestrator
+# will ask what applies to this project.
+[project.checklist]
+dod_items = [
+  "All acceptance criteria pass",
+  "Backend and frontend tests pass",
+  "No regressions in existing test suite",
+]
+
+# Your pipeline's steps, in order, each with the artifact that proves it ran.
+# A step shows as done once its artifact exists. Rename/reorder freely — the
+# toolkit never assumes these names.
+[[steps]]
+name = "Spec"
+artifact = "spec.md"
+
+[[steps]]
+name = "Implementation"
+artifact = "dev-report.md"
+
+[[steps]]
+name = "Review"
+artifact = "arch-review.md"
+
+[[steps]]
+name = "Test"
+artifact = "test-report.md"
+
+[transcripts]
+# Extra Claude Code config dirs to search for this project's transcripts.
+# $CLAUDE_CONFIG_DIR, the project root, and ~/.claude are always searched;
+# add others here only if you keep sessions somewhere unusual.
+# search = ["~/work/.claude"]
+
+[web]
+# Dashboard port. Default: 7391. Change it if you watch two projects at once.
+port = 7391

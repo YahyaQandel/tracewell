@@ -1,0 +1,15 @@
+.env
+.scratch/
+node_modules/
+__pycache__/
+*.pyc
+venv/
+.venv/
+db.sqlite3
+*.log
+.DS_Store
+dist/
+build/
+*.egg-info/
+media/
+Playwright reporting tool branding.zip
