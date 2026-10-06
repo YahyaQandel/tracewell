@@ -33,19 +33,18 @@ task_pattern = "TW-\\d+"
 
 # Ticket system agents fetch tickets from and file bugs to.
 [project.tickets]
-provider = "trello"
-board_id = "6ac41d2af52a1a21a0cdb2a7"
-board_url = "https://trello.com/b/PCh8SHQQ/tracewell"
-api_base = "https://api.trello.com/1"
-key_env = "TRELLO_API_KEY"
-token_env = "TRELLO_ACCESS_TOKEN"
-lists = { todo = "6ac41d3093ba0b67b251a24a", in_progress = "6ac41d30e296f23be4116b47", done = "6ac41d31f2cb2b17abfcd62a" }
+provider = "github"
+repo = "YahyaQandel/tracewell"
+project_number = 6
+project_url = "https://github.com/users/YahyaQandel/projects/6"
+auth = "gh CLI (gh issue / gh project), already authenticated as YahyaQandel"
 
-# Trello has no native custom-ID field, so task keys are a prefix we add to
-# each card title ourselves: "TW-<next_number> <card title>". Bump
-# next_number every time a card is created so keys stay sequential and unique.
+# GitHub issue numbers don't reset per-repo in a human-friendly way for a
+# brand-new repo, so task keys are a prefix we add to each issue title
+# ourselves: "TW-<next_number> <issue title>". Bump next_number every time
+# an issue is created so keys stay sequential and unique.
 key_prefix = "TW"
-next_number = 1
+next_number = 4
 
 # Tech stack and commands the developer/tester agents need to build, run,
 # and test this project.
