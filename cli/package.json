@@ -1,0 +1,31 @@
+{
+  "name": "tracewell",
+  "version": "0.1.0",
+  "description": "CLI to upload Playwright test run results to Tracewell.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "bin": {
+    "tracewell": "dist/bin/tracewell.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "undici": "^6.19.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^5.0.0"
+  }
+}

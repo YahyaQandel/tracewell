@@ -1,0 +1,31 @@
+{
+  "suites": [
+    {
+      "title": "broken.spec.ts",
+      "specs": [
+        {
+          "title": "fails every time",
+          "tests": [
+            {
+              "projectName": "chromium",
+              "results": [
+                {
+                  "status": "failed",
+                  "duration": 50,
+                  "retry": 0,
+                  "attachments": [
+                    {
+                      "name": "trace",
+                      "path": "data/trace-1.zip",
+                      "contentType": "application/zip"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

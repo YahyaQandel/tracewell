@@ -1,0 +1,47 @@
+{
+  "suites": [
+    {
+      "title": "example.spec.ts",
+      "specs": [
+        {
+          "title": "renders the homepage",
+          "tests": [
+            {
+              "projectName": "chromium",
+              "results": [
+                {
+                  "status": "passed",
+                  "duration": 123,
+                  "retry": 0,
+                  "attachments": [
+                    {
+                      "name": "screenshot",
+                      "path": "data/homepage.png",
+                      "contentType": "image/png"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "renders the login page",
+          "tests": [
+            {
+              "projectName": "chromium",
+              "results": [
+                {
+                  "status": "passed",
+                  "duration": 95,
+                  "retry": 0,
+                  "attachments": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

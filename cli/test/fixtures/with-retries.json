@@ -1,0 +1,49 @@
+{
+  "suites": [
+    {
+      "title": "flaky.spec.ts",
+      "specs": [
+        {
+          "title": "is flaky sometimes",
+          "tests": [
+            {
+              "projectName": "chromium",
+              "results": [
+                {
+                  "status": "failed",
+                  "duration": 40,
+                  "retry": 0,
+                  "attachments": [
+                    {
+                      "name": "trace",
+                      "path": "data/attempt-1-trace.zip",
+                      "contentType": "application/zip"
+                    }
+                  ]
+                },
+                {
+                  "status": "failed",
+                  "duration": 42,
+                  "retry": 1,
+                  "attachments": [
+                    {
+                      "name": "trace",
+                      "path": "data/attempt-2-trace.zip",
+                      "contentType": "application/zip"
+                    }
+                  ]
+                },
+                {
+                  "status": "passed",
+                  "duration": 38,
+                  "retry": 2,
+                  "attachments": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
