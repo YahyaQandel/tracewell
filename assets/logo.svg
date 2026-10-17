@@ -1,8 +1,14 @@
 <svg width="320" height="72" viewBox="0 0 320 72" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tracewell">
+  <style>
+    .tw-text { fill: #1e1e1e; }
+    @media (prefers-color-scheme: dark) {
+      .tw-text { fill: #e6e6e6; }
+    }
+  </style>
   <g>
     <rect x="4" y="14" width="30" height="9" fill="#0e8a72"/>
-    <rect x="16" y="29" width="40" height="9" fill="#3b3b3b"/>
+    <rect x="16" y="29" width="40" height="9" fill="#8a8a8a"/>
     <rect x="28" y="44" width="18" height="9" fill="#c4452f"/>
   </g>
-  <text x="70" y="47" font-family="'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace" font-size="34" font-weight="600" letter-spacing="-0.7" fill="#1e1e1e">tracewell</text>
+  <text x="70" y="47" class="tw-text" font-family="'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace" font-size="34" font-weight="600" letter-spacing="-0.7">tracewell</text>
 </svg>
