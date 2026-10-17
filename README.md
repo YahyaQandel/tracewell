@@ -1,4 +1,4 @@
-# Tracewell
+<img src="assets/logo.svg" alt="Tracewell" width="240">
 
 A Playwright test-reporting dashboard. CI uploads run results — pass/fail outcomes, retries, screenshots, and traces — and Tracewell shows run history, failures, flaky tests, and trends, so the team doesn't have to dig through CI logs.
 
