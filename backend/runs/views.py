@@ -23,20 +23,25 @@ class UploadRunView(APIView):
         report_raw = request.data.get('report')
         manifest_raw = request.data.get('manifest', '[]')
 
+        # cli/src/upload/httpClient.ts's classifyResponse reads `body.message`
+        # on a 400 (and falls back to a generic "malformed report" string if
+        # that key is absent) - it never reads `detail`, DRF's own
+        # convention. Using `message` here means the CLI actually surfaces
+        # the real validation reason instead of discarding it.
         try:
             report = json.loads(report_raw) if isinstance(report_raw, str) else report_raw
         except (TypeError, json.JSONDecodeError):
-            return Response({'detail': 'report is not valid JSON'}, status=400)
+            return Response({'message': 'report is not valid JSON'}, status=400)
 
         try:
             manifest = json.loads(manifest_raw) if isinstance(manifest_raw, str) else manifest_raw
         except (TypeError, json.JSONDecodeError):
-            return Response({'detail': 'manifest is not valid JSON'}, status=400)
+            return Response({'message': 'manifest is not valid JSON'}, status=400)
 
         try:
             parsed = parse_upload(report, manifest)
         except ParseError as exc:
-            return Response({'detail': str(exc)}, status=400)
+            return Response({'message': str(exc)}, status=400)
 
         branch = request.data.get('branch') or None
         commit_sha = request.data.get('commit') or None
@@ -44,9 +49,19 @@ class UploadRunView(APIView):
         # being present in multipart form data and otherwise ignored - no
         # Project model exists yet (design.md: out of scope for this ticket).
 
+        # The CLI sends every attachment under the literal, repeated field
+        # name "attachment[]" (buildMultipartRequest.ts) - there is no
+        # per-part field name on the wire. `partName` (e.g. "attachment-0")
+        # only exists inside the JSON manifest, and is assigned in the same
+        # order the CLI builds attachmentParts - so position in
+        # request.FILES.getlist('attachment[]') corresponds 1:1 to the
+        # index embedded in partName. request.data.items() would silently
+        # collapse repeated keys to the last one (MultiValueDict), which is
+        # what originally made this match nothing.
+        uploaded_files = request.FILES.getlist('attachment[]')
         attachment_files_by_part_name = {
-            key: value for key, value in request.data.items()
-            if key.startswith('attachment-') and hasattr(value, 'read')
+            f'attachment-{index}': uploaded_file
+            for index, uploaded_file in enumerate(uploaded_files)
         }
 
         try:

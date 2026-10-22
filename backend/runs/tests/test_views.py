@@ -39,6 +39,12 @@ class UploadRunViewTests(TestCase):
     url = reverse('runs:upload')
 
     def _post(self, report=VALID_REPORT, manifest=VALID_MANIFEST, attachments=None, extra=None):
+        # Mirrors the real CLI exactly (buildMultipartRequest.ts /
+        # httpClient.ts): every attachment is sent under the SAME literal
+        # field name "attachment[]", in manifest order - never per-part
+        # keys like "attachment-0". Django's test client supports repeated
+        # field names via a list value under one key, same as a real
+        # multipart request with repeated parts.
         data = {
             'report': json.dumps(report),
             'manifest': json.dumps(manifest),
@@ -46,14 +52,14 @@ class UploadRunViewTests(TestCase):
         if extra:
             data.update(extra)
         if attachments:
-            data.update(attachments)
+            data['attachment[]'] = attachments
         return self.client.post(self.url, data=data, format='multipart')
 
     def test_valid_upload_creates_run_with_full_outcome_set(self):
-        attachments = {
-            'attachment-0': SimpleUploadedFile('trace.zip', b'trace-bytes', content_type='application/zip'),
-            'attachment-1': SimpleUploadedFile('screenshot.png', b'png-bytes', content_type='image/png'),
-        }
+        attachments = [
+            SimpleUploadedFile('trace.zip', b'trace-bytes', content_type='application/zip'),
+            SimpleUploadedFile('screenshot.png', b'png-bytes', content_type='image/png'),
+        ]
         response = self._post(attachments=attachments)
 
         self.assertEqual(response.status_code, 201, response.content)
@@ -94,6 +100,15 @@ class UploadRunViewTests(TestCase):
         self.assertEqual(response.status_code, 201, response.content)
         self.assertEqual(Run.objects.count(), 1)
 
+    def test_successful_response_includes_a_url_field(self):
+        # cli/src/upload/httpClient.ts's classifyResponse reads `body.url`
+        # on 201 and prints it to the user - a response missing this key
+        # means every real upload prints a blank URL.
+        response = self._post()
+        self.assertEqual(response.status_code, 201, response.content)
+        run = Run.objects.get()
+        self.assertEqual(response.json()['url'], f'http://localhost:5173/runs/{run.id}')
+
     def test_malformed_json_report_returns_400_and_creates_nothing(self):
         response = self.client.post(
             self.url,
@@ -102,6 +117,11 @@ class UploadRunViewTests(TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(Run.objects.count(), 0)
+        # cli/src/upload/httpClient.ts's classifyResponse reads
+        # `body.message` on a 400, not DRF's conventional `detail` - using
+        # the wrong key means the CLI always falls back to a generic
+        # "malformed report" string and discards the real reason.
+        self.assertIn('message', response.json())
 
     def test_missing_tests_array_returns_400_and_creates_nothing(self):
         response = self._post(report={'not_tests': []})
@@ -184,6 +204,29 @@ class UploadRunViewTests(TestCase):
             ['timedOut', 'interrupted'],
         )
         self.assertEqual(serialized_titles['skipped test']['attempts'][0]['status'], 'skipped')
+
+    def test_attachment_file_content_is_actually_stored(self):
+        # Regression test for a real bug: the view used to match attachment
+        # multipart parts by a field-name convention ("attachment-0",
+        # "attachment-1") that the real CLI never sends - it always sends
+        # every attachment under the literal repeated field name
+        # "attachment[]" (see buildMultipartRequest.ts), with the numbered
+        # partName living only inside the JSON manifest. The old code
+        # silently matched nothing and dropped every attachment while still
+        # returning 201. This asserts the actual bytes round-trip, not just
+        # that an Attachment row with the right name exists.
+        attachments = [
+            SimpleUploadedFile('trace.zip', b'trace-bytes', content_type='application/zip'),
+            SimpleUploadedFile('screenshot.png', b'png-bytes', content_type='image/png'),
+        ]
+        response = self._post(attachments=attachments)
+        self.assertEqual(response.status_code, 201, response.content)
+
+        self.assertEqual(Attachment.objects.count(), 2)
+        trace = Attachment.objects.get(name='trace.zip')
+        screenshot = Attachment.objects.get(name='screenshot.png')
+        self.assertEqual(trace.file.read(), b'trace-bytes')
+        self.assertEqual(screenshot.file.read(), b'png-bytes')
 
     def test_no_attachments_is_valid(self):
         single_test_report = {

@@ -137,6 +137,14 @@ STATIC_URL = 'static/'
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# Base URL of the Tracewell frontend dashboard - used only to build the
+# `url` a run is reachable at in API responses. The frontend itself is not
+# built yet (see README.md); this setting lets the API emit a correctly
+# shaped, non-empty URL today (cli/src/upload/httpClient.ts's
+# classifyResponse already reads `body.url` and prints it to the user on
+# every upload) rather than leaving it blank until the frontend exists.
+FRONTEND_BASE_URL = os.environ.get('FRONTEND_BASE_URL', 'http://localhost:5173')
+
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
