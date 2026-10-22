@@ -6,6 +6,13 @@ file and run attachments (mounted into the container via Cloud Run's GCS
 FUSE volume support), and an Artifact Registry repo to hold the backend
 image once it exists.
 
+**Note:** `infra/terraform/` also exists in this repo — a separate,
+unapplied Terraform config (backend + frontend as two services, Secret
+Manager secrets) written by a different session. It has never been
+`apply`'d (no state file). This README and the resources below describe
+what's actually live. The two trees need to be reconciled by a human
+before either is extended further — don't assume this one wins.
+
 ## Live deployment
 
 | | |
