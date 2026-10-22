@@ -135,6 +135,56 @@ class UploadRunViewTests(TestCase):
         run = Run.objects.get()
         self.assertEqual(run.test_cases.count(), 0)
 
+    def test_full_attempt_status_vocabulary_round_trips(self):
+        # AC1 names the full attempt-level outcome set explicitly:
+        # passed/failed/timedOut/skipped/interrupted. Only passed/failed
+        # are exercised elsewhere in this suite - this proves the other
+        # three survive parse -> persist -> serialize unchanged, not just
+        # that the model/parser *accept* them as valid choices.
+        report = {
+            'tests': [
+                {
+                    'id': 'times out then is abandoned',
+                    'title': 'times out then is abandoned',
+                    'outcome': 'failed',
+                    'retries': [
+                        {'status': 'timedOut', 'duration': 30000, 'attachments': []},
+                        {'status': 'interrupted', 'duration': 0, 'attachments': []},
+                    ],
+                    'attachments': [],
+                },
+                {
+                    'id': 'skipped test',
+                    'title': 'skipped test',
+                    'outcome': 'skipped',
+                    'retries': [
+                        {'status': 'skipped', 'duration': 0, 'attachments': []},
+                    ],
+                    'attachments': [],
+                },
+            ],
+        }
+        response = self._post(report=report, manifest=[])
+        self.assertEqual(response.status_code, 201, response.content)
+
+        timeout_test = TestCaseModel.objects.get(title='times out then is abandoned')
+        self.assertEqual(timeout_test.outcome, 'failed')
+        statuses = list(timeout_test.attempts.order_by('attempt_number').values_list('status', flat=True))
+        self.assertEqual(statuses, ['timedOut', 'interrupted'])
+
+        skipped_test = TestCaseModel.objects.get(title='skipped test')
+        self.assertEqual(skipped_test.outcome, 'skipped')
+        self.assertEqual(skipped_test.attempts.get().status, 'skipped')
+
+        # Round-trips through the serializer too, not just the DB.
+        response_body = response.json()
+        serialized_titles = {tc['title']: tc for tc in response_body['test_cases']}
+        self.assertEqual(
+            [a['status'] for a in serialized_titles['times out then is abandoned']['attempts']],
+            ['timedOut', 'interrupted'],
+        )
+        self.assertEqual(serialized_titles['skipped test']['attempts'][0]['status'], 'skipped')
+
     def test_no_attachments_is_valid(self):
         single_test_report = {
             'tests': [

@@ -106,6 +106,27 @@ class ParseUploadTests(SimpleTestCase):
         with self.assertRaises(ParseError):
             parse_upload('not even json-decodable as a dict', [])
 
+    def test_attachment_content_type_resolved_from_report_by_name(self):
+        # content_type is a fallback value (the view layer prefers the
+        # actual uploaded multipart part's own content_type when one is
+        # present) - but when it's used, it must be looked up from the
+        # report's own declared AttachmentRef.contentType by name, not a
+        # hardcoded placeholder.
+        manifest = [
+            {'testId': 'flaky test', 'attachmentName': 'trace.zip', 'partName': 'attachment-0', 'retryIndex': 0},
+        ]
+        parsed = parse_upload(VALID_REPORT, manifest)
+        flaky_test = parsed.tests[1]
+        self.assertEqual(flaky_test.attempts[0].attachments[0].content_type, 'application/zip')
+
+    def test_attachment_content_type_defaults_when_report_never_declared_it(self):
+        manifest = [
+            {'testId': 'flaky test', 'attachmentName': 'not-in-report.log', 'partName': 'attachment-0', 'retryIndex': 0},
+        ]
+        parsed = parse_upload(VALID_REPORT, manifest)
+        flaky_test = parsed.tests[1]
+        self.assertEqual(flaky_test.attempts[0].attachments[0].content_type, 'application/octet-stream')
+
     def test_duplicate_attachment_name_within_a_retry_keeps_both(self):
         # Two distinct files can legitimately share a display name (e.g.
         # two screenshots both named "screenshot.png"). partName is the

@@ -35,6 +35,10 @@ class ParsedAttempt:
     status: str
     duration_ms: int
     attachments: list[ParsedAttachment] = field(default_factory=list)
+    # Raw AttachmentRef[] from this retry's own "attachments" field, kept
+    # only so _apply_manifest_entry can look up a declared contentType by
+    # name - not part of this module's public contract with views.py.
+    _raw_attachments_by_name: dict = field(default_factory=dict, repr=False)
 
 
 @dataclass
@@ -106,7 +110,21 @@ def _parse_attempt(retry_index, raw) -> ParsedAttempt:
         raise ParseError(f'unrecognized attempt status: {status!r}')
     if not isinstance(duration, (int, float)):
         raise ParseError('retry "duration" must be a number')
-    return ParsedAttempt(retry_index=retry_index, status=status, duration_ms=int(duration), attachments=[])
+
+    raw_attachments = raw.get('attachments') or []
+    raw_by_name = {}
+    if isinstance(raw_attachments, list):
+        for raw_attachment in raw_attachments:
+            if isinstance(raw_attachment, dict) and isinstance(raw_attachment.get('name'), str):
+                raw_by_name[raw_attachment['name']] = raw_attachment.get('contentType')
+
+    return ParsedAttempt(
+        retry_index=retry_index,
+        status=status,
+        duration_ms=int(duration),
+        attachments=[],
+        _raw_attachments_by_name=raw_by_name,
+    )
 
 
 def _apply_manifest_entry(entry, tests_by_id):
@@ -131,17 +149,20 @@ def _apply_manifest_entry(entry, tests_by_id):
     # be named "screenshot.png" by the test code) - each still gets its
     # own ParsedAttachment/partName/Attachment row. No dedup: partName is
     # already the real uniqueness key (one per uploaded file part), name
-    # is just display metadata and is allowed to collide.
-    # content_type: looked up from the report's own retries[].attachments
-    # by name (design.md's non-blocking note: content-type can also come
-    # from the multipart part itself; this parser's single source of
-    # truth is the report's own attachment metadata, since the parser
-    # only ever sees JSON here — the multipart part's content-type is
-    # resolved by the view layer when it builds the attachment file, not
-    # here). Default to 'application/octet-stream' if the report itself
-    # never declared this attachment (manifest and report disagreeing is
-    # not itself a hard error - the file still gets stored).
-    content_type = 'application/octet-stream'
+    # is just display metadata and is allowed to collide. When more than
+    # one raw attachment shares a name, dict lookup below picks whichever
+    # was last in the report's own list - a second, independent source
+    # (the view layer's uploaded_file.content_type) is preferred over
+    # this value anyway, so this ambiguity doesn't surface in practice.
+    #
+    # content_type: looked up from this retry's own raw "attachments" by
+    # name (design.md's non-blocking note - content-type can also come
+    # from the multipart part itself, which the view layer prefers when
+    # available; this is only the fallback for when it isn't). Default
+    # to 'application/octet-stream' if the report itself never declared
+    # this attachment (manifest and report disagreeing is not itself a
+    # hard error - the file still gets stored).
+    content_type = attempt._raw_attachments_by_name.get(attachment_name) or 'application/octet-stream'
     attempt.attachments.append(
         ParsedAttachment(part_name=part_name, name=attachment_name, content_type=content_type)
     )
