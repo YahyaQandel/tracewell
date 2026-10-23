@@ -35,6 +35,18 @@ class RunModelTests(TestCase):
         self.assertNotEqual(run_a.id, run_b.id)
 
 
+class AttemptErrorFieldDefaultTests(TestCase):
+    def test_error_fields_default_to_none(self):
+        run = Run.objects.create()
+        test_case = TestCaseModel.objects.create(run=run, title='t', outcome='failed')
+        attempt = Attempt.objects.create(test_case=test_case, attempt_number=1, status='failed', duration_ms=1)
+
+        self.assertIsNone(attempt.error_message)
+        self.assertIsNone(attempt.error_stack)
+        self.assertIsNone(attempt.error_file)
+        self.assertIsNone(attempt.error_line)
+
+
 class CascadeDeleteTests(TestCase):
     def setUp(self):
         self.run = Run.objects.create()

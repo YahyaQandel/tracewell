@@ -12,10 +12,27 @@ class AttachmentSerializer(serializers.ModelSerializer):
 
 class AttemptSerializer(serializers.ModelSerializer):
     attachments = AttachmentSerializer(many=True, read_only=True)
+    error = serializers.SerializerMethodField()
 
     class Meta:
         model = Attempt
-        fields = ['id', 'attempt_number', 'status', 'duration_ms', 'attachments']
+        fields = ['id', 'attempt_number', 'status', 'duration_ms', 'error', 'attachments']
+
+    def get_error(self, attempt):
+        # null for passed/skipped (nothing to show) - a non-null object
+        # with all-null inner fields for failed/timedOut (something to
+        # show, just not populated yet - see #51). Branches on status,
+        # not on whether error_message happens to be set, since status
+        # is the actual semantic signal and nothing enforces the two
+        # staying in sync at the DB layer.
+        if attempt.status not in ('failed', 'timedOut'):
+            return None
+        return {
+            'message': attempt.error_message,
+            'stack': attempt.error_stack,
+            'file': attempt.error_file,
+            'line': attempt.error_line,
+        }
 
 
 class TestCaseSerializer(serializers.ModelSerializer):

@@ -955,3 +955,115 @@ class RunDetailViewTests(TestCase):
             len(small_ctx.captured_queries), len(large_ctx.captured_queries),
             'query count must not scale with test_case/attempt/attachment count (N+1 check)',
         )
+
+
+class AttemptErrorFieldTests(TestCase):
+    def test_passed_attempt_has_null_error(self):
+        org, project, member = _make_org_project_member()
+        run = Run.objects.create(project=project)
+        test_case = TestCaseModel.objects.create(run=run, title='passed test', outcome='passed')
+        Attempt.objects.create(test_case=test_case, attempt_number=1, status='passed', duration_ms=10)
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        attempt = response.json()['test_cases'][0]['attempts'][0]
+        self.assertIsNone(attempt['error'])
+
+    def test_skipped_attempt_has_null_error(self):
+        org, project, member = _make_org_project_member()
+        run = Run.objects.create(project=project)
+        test_case = TestCaseModel.objects.create(run=run, title='skipped test', outcome='skipped')
+        Attempt.objects.create(test_case=test_case, attempt_number=1, status='skipped', duration_ms=0)
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        attempt = response.json()['test_cases'][0]['attempts'][0]
+        self.assertIsNone(attempt['error'])
+
+    def test_failed_attempt_with_no_error_data_yet_gets_non_null_object_with_null_fields(self):
+        # The assertion most likely to get flipped by mistake (spec.md):
+        # error must NOT be null here, even though every inner field is -
+        # this is the real, current state of every failed attempt today
+        # (no CLI sends error data yet, see #51), and the frontend needs
+        # to distinguish "failed, no error details yet" from "didn't
+        # fail, nothing to show" - collapsing both to null would erase
+        # that distinction.
+        org, project, member = _make_org_project_member()
+        run = Run.objects.create(project=project)
+        test_case = TestCaseModel.objects.create(run=run, title='failed test', outcome='failed')
+        Attempt.objects.create(test_case=test_case, attempt_number=1, status='failed', duration_ms=10)
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        attempt = response.json()['test_cases'][0]['attempts'][0]
+        self.assertIsNotNone(attempt['error'])
+        self.assertIsNone(attempt['error']['message'])
+        self.assertIsNone(attempt['error']['stack'])
+        self.assertIsNone(attempt['error']['file'])
+        self.assertIsNone(attempt['error']['line'])
+
+    def test_failed_attempt_with_real_error_data_returns_it(self):
+        # Simulates what #51's CLI fix will eventually produce - exercised
+        # directly against the model since the CLI can't send this yet.
+        org, project, member = _make_org_project_member()
+        run = Run.objects.create(project=project)
+        test_case = TestCaseModel.objects.create(run=run, title='failed test', outcome='failed')
+        Attempt.objects.create(
+            test_case=test_case, attempt_number=1, status='failed', duration_ms=10,
+            error_message='Expected 2 but received 3',
+            error_stack='AssertionError: ...\n  at test.spec.ts:42',
+            error_file='tests/example.spec.ts',
+            error_line=42,
+        )
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        error = response.json()['test_cases'][0]['attempts'][0]['error']
+        self.assertEqual(error['message'], 'Expected 2 but received 3')
+        self.assertEqual(error['stack'], 'AssertionError: ...\n  at test.spec.ts:42')
+        self.assertEqual(error['file'], 'tests/example.spec.ts')
+        self.assertEqual(error['line'], 42)
+
+    def test_timedout_attempt_gets_non_null_error_and_distinct_status(self):
+        # AC5: timedOut must be distinguishable from a regular failure -
+        # confirms the existing status field (not a new boolean) carries
+        # this distinction through unchanged.
+        org, project, member = _make_org_project_member()
+        run = Run.objects.create(project=project)
+        test_case = TestCaseModel.objects.create(run=run, title='slow test', outcome='failed')
+        Attempt.objects.create(test_case=test_case, attempt_number=1, status='timedOut', duration_ms=30000)
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        attempt = response.json()['test_cases'][0]['attempts'][0]
+        self.assertEqual(attempt['status'], 'timedOut')
+        self.assertIsNotNone(attempt['error'])
+
+    def test_upload_response_also_includes_error_field_without_crashing(self):
+        # The same AttemptSerializer is shared by UploadRunView's
+        # upload-echo response (TW-2) - confirm that path doesn't break
+        # now that the serializer has a new nested field with no
+        # corresponding data from today's parser.
+        project, token = _make_project_and_token()
+        report = json.dumps({
+            'tests': [{
+                'id': 'failing test', 'title': 'failing test', 'outcome': 'failed',
+                'retries': [{'status': 'failed', 'duration': 50, 'attachments': []}],
+                'attachments': [],
+            }],
+        })
+        response = self.client.post(
+            reverse('runs:upload'),
+            {'report': report, 'manifest': '[]'},
+            HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        attempt = response.json()['test_cases'][0]['attempts'][0]
+        self.assertIsNotNone(attempt['error'])
+        self.assertIsNone(attempt['error']['message'])
