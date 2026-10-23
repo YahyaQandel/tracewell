@@ -5,7 +5,7 @@ from rest_framework.views import APIView
 
 from organizations.models import OrganizationMembership
 from projects.models import Project
-from projects.serializers import ProjectSerializer
+from projects.serializers import ProjectListSerializer, ProjectSerializer
 from projects.slugs import slugify_project_name
 
 
@@ -31,6 +31,19 @@ class OrganizationScopedView(APIView):
 
 
 class ProjectListCreateView(OrganizationScopedView):
+    def get(self, request, organization_id):
+        self._require_membership(request, organization_id)
+
+        projects = Project.objects.filter(organization_id=organization_id)
+        member_count = OrganizationMembership.objects.filter(
+            organization_id=organization_id,
+        ).count()
+
+        serializer = ProjectListSerializer(
+            projects, many=True, context={'member_count': member_count},
+        )
+        return Response(serializer.data, status=200)
+
     def post(self, request, organization_id):
         self._require_membership(request, organization_id)
 
