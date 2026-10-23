@@ -4,7 +4,9 @@ from django.contrib.auth.models import User
 from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
+from organizations.exceptions import LastOwnerError
 from organizations.models import Organization, OrganizationMembership
+from organizations.views import _assert_not_last_owner
 
 
 def _membership_url(organization_id, membership_id):
@@ -120,28 +122,100 @@ class RemoveMemberTests(TestCase):
         self.assertFalse(OrganizationMembership.objects.filter(id=membership.id).exists())
 
 
+class LastOwnerGuardLockScopeTests(TestCase):
+    """Fast, deterministic, database-engine-independent test for the
+    actual structural defect a fresh-session review caught:
+    `_assert_not_last_owner` used to call `.exclude(id=exclude_membership_id)`
+    on the SAME queryset that `.select_for_update()` locks, so the locked
+    row set and the excluded row were coupled - two concurrent calls each
+    excluding a DIFFERENT row (two different owners being mutated at once)
+    would lock disjoint row sets and never contend, providing zero
+    serialization between them.
+
+    An outcome-based test (call it twice sequentially, check what it
+    returns/raises) CANNOT distinguish the buggy version from the fixed
+    one - both give identical answers for sequential, non-concurrent
+    calls, since the exclude-before-count logic is correct in isolation;
+    the bug only manifests when two calls's *lock acquisitions* overlap
+    in time. (This was verified directly: an earlier draft of this test
+    asserted only on return values/exceptions and passed unchanged against
+    the reverted buggy code - a false negative. Kept a note here instead
+    of silently fixing it without a trace.)
+
+    What actually distinguishes the two versions is which rows the LOCK
+    query's WHERE clause targets, independent of the exclude applied to
+    the count. Assert on that directly, via the queryset's compiled SQL,
+    rather than on an outcome that happens to coincide for both versions
+    under single-threaded execution.
+    """
+
+    def test_lock_query_covers_every_owner_row_not_just_the_non_excluded_ones(self):
+        org = Organization.objects.create(name='Acme')
+        owner_a = User.objects.create_user(username='lock-owner-a', password='pw')
+        owner_b = User.objects.create_user(username='lock-owner-b', password='pw')
+        membership_a = OrganizationMembership.objects.create(organization=org, user=owner_a, role='owner')
+        membership_b = OrganizationMembership.objects.create(organization=org, user=owner_b, role='owner')
+
+        # Capture the ACTUAL SQL _assert_not_last_owner itself issues (not
+        # a reconstructed query of our own, which would test nothing about
+        # the real function) and assert the locked/counted query's WHERE
+        # clause does not filter out either owner's id. The buggy version
+        # chained .exclude(id=exclude_membership_id) directly onto the
+        # select_for_update()'d queryset, so its SQL contains a
+        # `NOT (... id = <value>)` clause narrowing the locked set itself;
+        # the fix locks the full owner set unconditionally and applies the
+        # exclude only to the in-memory id list afterward, so the emitted
+        # SQL has no such clause at all.
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with self.settings(DEBUG=True), CaptureQueriesContext(connection) as ctx:
+            _assert_not_last_owner(org.id, exclude_membership_id=membership_a.id)
+
+        lock_queries = [q['sql'] for q in ctx.captured_queries if 'organizations_organizationmembership' in q['sql'].lower()]
+        self.assertTrue(lock_queries, 'expected _assert_not_last_owner to issue at least one query against OrganizationMembership')
+        for sql in lock_queries:
+            self.assertNotIn(
+                'NOT', sql.upper(),
+                f"the lock/count query must not exclude any row by id - exclude belongs only in the "
+                f"in-memory count after the full owner set is locked, never in the locked queryset "
+                f"itself (two concurrent calls excluding different rows would then lock disjoint, "
+                f"non-contending sets). Query was: {sql}",
+            )
+
+        # Behavioral sanity check (not the primary assertion - see
+        # docstring on why outcome alone can't catch the real bug): still
+        # correct with two owners present, and still raises once only one
+        # remains.
+        membership_a.role = 'member'
+        membership_a.save(update_fields=['role'])
+        with self.assertRaises(LastOwnerError):
+            _assert_not_last_owner(org.id, exclude_membership_id=membership_b.id)
+
+
 class LastOwnerGuardConcurrencyTests(TransactionTestCase):
-    """Regression test for a code-review-caught TOCTOU race: two owners,
-    each concurrently demoting/removing the other, could previously both
-    pass the "am I the last owner" check before either mutation committed
-    (the check and the mutation weren't in the same locked transaction),
-    leaving the organization with zero owners and no recovery path.
+    """Threaded regression test for the same TOCTOU race described above.
 
     Uses TransactionTestCase (not TestCase) for the same reason as
     runs/tests/test_views.py's ConcurrentUploadTests: TestCase wraps each
     test in a transaction that rolls back at the end, which would hide a
     real cross-thread transaction interaction.
 
-    SQLite has no real row-level locking - select_for_update() escalates
-    to a table-level write lock, so the losing thread can surface as
-    either a clean 400 (if it reaches the application-level check) or a
-    raw `database is locked` OperationalError (if SQLite's own lock wins
-    the race first). Either outcome means the invariant held: the point
-    of this test is that the two concurrent demotions must NEVER both
-    succeed (status 200) - never that the loser's exact error shape is
-    deterministic under SQLite's coarser locking. See issue #34 for the
-    same SQLite-concurrency caveat already tracked on this codebase's
-    other concurrent-write test.
+    Known limitation (confirmed during review, do not "fix" by assuming
+    this test alone is sufficient): SQLite has NO real row-level locking -
+    select_for_update() silently compiles to a plain SELECT with no FOR
+    UPDATE clause at all on this backend. Any apparent protection this
+    test shows on SQLite comes from SQLite's own incidental single-writer
+    serialization of the underlying UPDATE statements, not from anything
+    the application does - a build with the lock removed entirely still
+    passes this test on SQLite. The real regression coverage for the
+    locking logic itself is LastOwnerGuardLockScopeTests above; this test
+    is kept as a realistic end-to-end exercise of the HTTP-level flow, and
+    was independently verified against real Postgres (10/10 trials safe
+    post-fix, 10/10 trials reproduced the zero-owner bug pre-fix) during
+    this story's review - see PR #38. See also issue #34 for the same
+    SQLite-concurrency caveat on this codebase's other concurrent-write
+    test.
     """
 
     def test_concurrent_demotion_of_both_owners_rejects_exactly_one(self):

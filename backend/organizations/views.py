@@ -129,16 +129,33 @@ class MembershipDetailView(OrganizationScopedView):
 
 
 def _assert_not_last_owner(organization_id, exclude_membership_id):
-    """Must be called inside a transaction.atomic() block that also holds
-    the lock taken below for the rest of its duration (i.e. the actual
-    role-change/delete must happen before the transaction commits) - this
-    function only takes the lock, it doesn't hold it past its own return.
-    Without a surrounding atomic()+this lock, two concurrent requests can
-    each see the other owner as "remaining," both pass, and both commit,
-    leaving zero owners with no recovery path (the race this exists to
-    prevent)."""
-    remaining_owners = OrganizationMembership.objects.select_for_update().filter(
-        organization_id=organization_id, role='owner',
-    ).exclude(id=exclude_membership_id).count()
-    if remaining_owners == 0:
+    """Must be called inside a transaction.atomic() block, with the
+    mutation of the target row happening before that block ends (so the
+    lock taken here is held through the mutation, not released before it).
+
+    PREVIOUS BUG (caught by a second-round fresh review, reproduced on
+    real Postgres, confirmed to be a no-op on SQLite): this used to
+    .exclude(id=exclude_membership_id) BEFORE locking, which locks only
+    the *other* owner rows, not the full owner set. Two concurrent
+    requests demoting/removing two DIFFERENT owners of the same org each
+    exclude a different row, so their lock sets are disjoint and never
+    contend - the lock provided zero serialization between them, and both
+    could pass the "am I the last owner" check and both commit, leaving
+    zero owners.
+
+    Fix: lock every owner row for the organization FIRST (no exclude), so
+    two concurrent mutations of any two owner rows in the same org always
+    contend for an overlapping lock set and are forced to serialize - the
+    second request's count only runs after the first's transaction (which
+    already changed its target's role away from 'owner', or deleted it)
+    has committed. The exclude happens only in the count itself, after
+    the lock on the full set is already held.
+    """
+    owner_ids = list(
+        OrganizationMembership.objects.select_for_update().filter(
+            organization_id=organization_id, role='owner',
+        ).values_list('id', flat=True)
+    )
+    remaining_owners = len(owner_ids) - (1 if exclude_membership_id in owner_ids else 0)
+    if remaining_owners <= 0:
         raise LastOwnerError()
