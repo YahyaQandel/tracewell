@@ -1,0 +1,186 @@
+from django.contrib.auth.models import User
+from django.test import TestCase
+from django.urls import reverse
+
+from organizations.models import Organization, OrganizationMembership
+from projects.models import Project
+
+
+def _projects_url(organization_id):
+    return reverse('project-list', kwargs={'organization_id': organization_id})
+
+
+def _slug_preview_url(organization_id):
+    return reverse('project-slug-preview', kwargs={'organization_id': organization_id})
+
+
+class CreateProjectTests(TestCase):
+    def test_unauthenticated_request_gets_403_not_404(self):
+        org = Organization.objects.create(name='Acme')
+        response = self.client.post(_projects_url(org.id), {'name': 'Frontend'})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(Project.objects.count(), 0)
+
+    def test_non_member_gets_404_not_403(self):
+        outsider = User.objects.create_user(username='outsider', password='pw')
+        org = Organization.objects.create(name='Acme')
+        self.client.force_login(outsider)
+
+        response = self.client.post(
+            _projects_url(org.id), {'name': 'Frontend'}, content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(Project.objects.count(), 0)
+
+    def test_nonexistent_organization_also_gets_404(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        self.client.force_login(member)
+
+        response = self.client.post(
+            _projects_url('00000000-0000-0000-0000-000000000000'),
+            {'name': 'Frontend'},
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_member_can_create_a_project(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=member, role='member')
+        self.client.force_login(member)
+
+        response = self.client.post(
+            _projects_url(org.id), {'name': 'My Project!'}, content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        project = Project.objects.get()
+        self.assertEqual(project.organization, org)
+        self.assertEqual(project.name, 'My Project!')
+        self.assertEqual(project.slug, 'my-project')
+
+    def test_response_includes_id_organization_name_and_slug(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=member, role='owner')
+        self.client.force_login(member)
+
+        response = self.client.post(
+            _projects_url(org.id), {'name': 'My Project'}, content_type='application/json',
+        )
+
+        body = response.json()
+        project = Project.objects.get()
+        self.assertEqual(body['id'], str(project.id))
+        self.assertEqual(body['organization'], str(org.id))
+        self.assertEqual(body['name'], 'My Project')
+        self.assertEqual(body['slug'], 'my-project')
+
+    def test_empty_name_is_rejected_and_creates_nothing(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=member, role='owner')
+        self.client.force_login(member)
+
+        response = self.client.post(
+            _projects_url(org.id), {'name': ''}, content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Project.objects.count(), 0)
+
+    def test_missing_name_is_rejected_and_creates_nothing(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=member, role='owner')
+        self.client.force_login(member)
+
+        response = self.client.post(_projects_url(org.id), {}, content_type='application/json')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Project.objects.count(), 0)
+
+    def test_all_punctuation_name_slugifies_to_empty_and_is_rejected(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=member, role='owner')
+        self.client.force_login(member)
+
+        response = self.client.post(
+            _projects_url(org.id), {'name': '!!!'}, content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Project.objects.count(), 0)
+
+    def test_slug_collision_within_same_organization_returns_409(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=member, role='owner')
+        self.client.force_login(member)
+        self.client.post(_projects_url(org.id), {'name': 'Frontend'}, content_type='application/json')
+
+        response = self.client.post(
+            _projects_url(org.id), {'name': 'Frontend'}, content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(Project.objects.filter(slug='frontend', organization=org).count(), 1)
+
+    def test_same_slug_in_different_organization_does_not_collide(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        org_a = Organization.objects.create(name='Acme')
+        org_b = Organization.objects.create(name='Globex')
+        OrganizationMembership.objects.create(organization=org_a, user=member, role='owner')
+        OrganizationMembership.objects.create(organization=org_b, user=member, role='owner')
+        self.client.force_login(member)
+
+        response_a = self.client.post(
+            _projects_url(org_a.id), {'name': 'Frontend'}, content_type='application/json',
+        )
+        response_b = self.client.post(
+            _projects_url(org_b.id), {'name': 'Frontend'}, content_type='application/json',
+        )
+
+        self.assertEqual(response_a.status_code, 201)
+        self.assertEqual(response_b.status_code, 201)
+
+
+class SlugPreviewTests(TestCase):
+    def test_unauthenticated_get_gets_403_not_404(self):
+        org = Organization.objects.create(name='Acme')
+        response = self.client.get(_slug_preview_url(org.id), {'name': 'My Project'})
+        self.assertEqual(response.status_code, 403)
+
+    def test_requires_membership(self):
+        outsider = User.objects.create_user(username='outsider', password='pw')
+        org = Organization.objects.create(name='Acme')
+        self.client.force_login(outsider)
+
+        response = self.client.get(_slug_preview_url(org.id), {'name': 'My Project'})
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_returns_derived_slug_without_creating_a_project(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=member, role='member')
+        self.client.force_login(member)
+
+        response = self.client.get(_slug_preview_url(org.id), {'name': 'My Project!'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'slug': 'my-project'})
+        self.assertEqual(Project.objects.count(), 0)
+
+    def test_empty_name_returns_400(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=member, role='member')
+        self.client.force_login(member)
+
+        response = self.client.get(_slug_preview_url(org.id), {'name': ''})
+
+        self.assertEqual(response.status_code, 400)

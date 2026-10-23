@@ -107,6 +107,18 @@ class UploadRunView(APIView):
                                 content_type=getattr(uploaded_file, 'content_type', None) or parsed_attachment.content_type,
                                 file=uploaded_file,
                             )
+
+            # Serializing re-reads the Run and its nested test_cases/
+            # attempts/attachments - under the same SQLite write
+            # contention this is meant to survive, that read can itself
+            # raise OperationalError even though the write above already
+            # committed cleanly. Must stay inside this try so a request
+            # that genuinely succeeded doesn't crash with an unhandled
+            # 500 while building its own success response (this was a
+            # real bug: a write-succeeded request could still report as
+            # a total failure).
+            serializer = RunSerializer(run)
+            response_data = serializer.data
         except OperationalError:
             # AC3 (data-corruption, not throughput, guarantee): under
             # SQLite write contention a concurrent request can be
@@ -119,5 +131,4 @@ class UploadRunView(APIView):
                 status=503,
             )
 
-        serializer = RunSerializer(run)
-        return Response(serializer.data, status=201)
+        return Response(response_data, status=201)
