@@ -2,6 +2,7 @@ import json
 
 from django.db import OperationalError, transaction
 from rest_framework.parsers import MultiPartParser
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -16,8 +17,15 @@ class UploadRunView(APIView):
     AC4: the whole parse-and-validate step happens before any DB row or
     attachment file is written, and all writes happen inside one
     transaction.atomic() block, so a failure never leaves a partial Run.
+
+    TW-22 made IsAuthenticated the project-wide DRF default. This endpoint
+    is what `npx tracewell upload` hits from CI with no login flow of its
+    own, and must stay unauthenticated - explicit empty overrides here,
+    not an omission.
     """
     parser_classes = [MultiPartParser]
+    authentication_classes = []
+    permission_classes = [AllowAny]
 
     def post(self, request):
         report_raw = request.data.get('report')
