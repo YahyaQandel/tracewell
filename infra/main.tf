@@ -138,6 +138,11 @@ resource "google_cloud_run_v2_service" "tracewell" {
       }
 
       env {
+        name  = "DJANGO_CSRF_TRUSTED_ORIGINS"
+        value = var.csrf_trusted_origin
+      }
+
+      env {
         name  = "DJANGO_DEBUG"
         value = "false"
       }

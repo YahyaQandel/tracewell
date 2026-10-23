@@ -27,3 +27,20 @@ variable "admin_email" {
   type        = string
   default     = "yahya.qandel@gmail.com"
 }
+
+variable "csrf_trusted_origin" {
+  description = <<-EOT
+    Full scheme+host of this Cloud Run service's own URL, for Django's
+    CSRF_TRUSTED_ORIGINS (required for the admin login form and any other
+    POST to work at all - ALLOWED_HOSTS=* is not sufficient on its own).
+    Cloud Run assigns this on first service creation and it stays stable
+    across redeploys, so it can't be computed from this same apply without
+    a circular self-reference - the default below is this project's real,
+    already-existing URL. If this service is ever recreated from scratch
+    (new project, deleted and redeployed), get the new URL from
+    `terraform output cloud_run_url` after the FIRST apply (it will 403 on
+    POST until a second apply sets this correctly) and pass it via -var.
+  EOT
+  type        = string
+  default     = "https://tracewell-sxsi7kqutq-uc.a.run.app"
+}

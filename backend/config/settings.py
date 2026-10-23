@@ -34,6 +34,15 @@ DEBUG = os.environ.get('DJANGO_DEBUG', 'true').lower() == 'true'
 
 ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '*').split(',')
 
+# ALLOWED_HOSTS=* is not sufficient CSRF protection on its own - Django
+# checks the request's Origin/Referer against this separate list for any
+# state-changing (POST/PUT/etc.) request, including the admin login form.
+# Comma-separated, each entry a full scheme+host (no path), e.g.
+# "https://tracewell-sxsi7kqutq-uc.a.run.app".
+CSRF_TRUSTED_ORIGINS = [
+    origin for origin in os.environ.get('DJANGO_CSRF_TRUSTED_ORIGINS', '').split(',') if origin
+]
+
 
 # Application definition
 
