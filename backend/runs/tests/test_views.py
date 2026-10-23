@@ -1,11 +1,26 @@
 import json
 import threading
+from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 
+from organizations.models import Organization
+from projects.models import Project
 from runs.models import Attachment, Attempt, Run, TestCase as TestCaseModel
+from tokens.models import ApiToken, generate_raw_token, hash_token
+
+
+def _make_project_and_token():
+    org = Organization.objects.create(name='Acme')
+    project = Project.objects.create(organization=org, name='Widgets', slug='widgets')
+    raw_token = generate_raw_token()
+    ApiToken.objects.create(
+        project=project, name='CI', token_hash=hash_token(raw_token),
+        display_prefix=raw_token[:12], display_suffix=raw_token[-4:],
+    )
+    return project, raw_token
 
 VALID_REPORT = {
     'tests': [
@@ -38,7 +53,10 @@ VALID_MANIFEST = [
 class UploadRunViewTests(TestCase):
     url = reverse('runs:upload')
 
-    def _post(self, report=VALID_REPORT, manifest=VALID_MANIFEST, attachments=None, extra=None):
+    def setUp(self):
+        self.project, self.raw_token = _make_project_and_token()
+
+    def _post(self, report=VALID_REPORT, manifest=VALID_MANIFEST, attachments=None, extra=None, token=None):
         # Mirrors the real CLI exactly (buildMultipartRequest.ts /
         # httpClient.ts): every attachment is sent under the SAME literal
         # field name "attachment[]", in manifest order - never per-part
@@ -53,7 +71,9 @@ class UploadRunViewTests(TestCase):
             data.update(extra)
         if attachments:
             data['attachment[]'] = attachments
-        return self.client.post(self.url, data=data, format='multipart')
+        auth_token = self.raw_token if token is None else token
+        headers = {'Authorization': f'Bearer {auth_token}'} if auth_token else {}
+        return self.client.post(self.url, data=data, format='multipart', headers=headers)
 
     def test_valid_upload_creates_run_with_full_outcome_set(self):
         attachments = [
@@ -95,8 +115,89 @@ class UploadRunViewTests(TestCase):
         self.assertEqual(run.branch, 'main')
         self.assertEqual(run.commit_sha, 'abc123')
 
-    def test_project_part_is_accepted_and_ignored(self):
-        response = self._post(extra={'project': 'some-project-id'})
+    def test_project_body_field_is_ignored_in_favor_of_the_authenticated_tokens_project(self):
+        # TW-26: the authenticated token's own project determines the
+        # run's project - a client-sent `project` string in the body is
+        # never read for this purpose, no matter what it says. This is
+        # strictly safer than trusting a client-supplied value.
+        response = self._post(extra={'project': 'some-other-project-id-that-does-not-exist'})
+        self.assertEqual(response.status_code, 201, response.content)
+        run = Run.objects.get()
+        self.assertEqual(run.project, self.project)
+
+    def test_run_is_attached_to_the_authenticated_tokens_project(self):
+        response = self._post()
+        self.assertEqual(response.status_code, 201, response.content)
+        run = Run.objects.get()
+        self.assertEqual(run.project, self.project)
+
+    def test_missing_authorization_header_is_rejected(self):
+        response = self._post(token='')
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(Run.objects.count(), 0)
+
+    def test_malformed_authorization_header_is_rejected(self):
+        response = self.client.post(
+            self.url,
+            data={'report': json.dumps(VALID_REPORT), 'manifest': json.dumps(VALID_MANIFEST)},
+            format='multipart',
+            headers={'Authorization': 'NotBearer something'},
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(Run.objects.count(), 0)
+
+    def test_unknown_token_is_rejected(self):
+        response = self._post(token='tw_live_this-token-does-not-exist')
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(Run.objects.count(), 0)
+
+    def test_revoked_token_is_rejected(self):
+        from django.utils import timezone
+
+        token = ApiToken.objects.get(token_hash=hash_token(self.raw_token))
+        token.revoked_at = timezone.now()
+        token.save(update_fields=['revoked_at'])
+
+        response = self._post()
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(Run.objects.count(), 0)
+
+    def test_successful_auth_updates_last_used_at(self):
+        token = ApiToken.objects.get(token_hash=hash_token(self.raw_token))
+        self.assertIsNone(token.last_used_at)
+
+        response = self._post()
+
+        self.assertEqual(response.status_code, 201, response.content)
+        token.refresh_from_db()
+        self.assertIsNotNone(token.last_used_at)
+
+    def test_a_failed_upload_with_a_valid_token_still_updates_last_used_at(self):
+        # "Used" means "authenticated," not "succeeded at creating a run"
+        # - a malformed report still proves the token is live.
+        token = ApiToken.objects.get(token_hash=hash_token(self.raw_token))
+        self.assertIsNone(token.last_used_at)
+
+        response = self.client.post(
+            self.url,
+            data={'report': 'not valid json{{{', 'manifest': '[]'},
+            format='multipart',
+            headers={'Authorization': f'Bearer {self.raw_token}'},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        token.refresh_from_db()
+        self.assertIsNotNone(token.last_used_at)
+
+    def test_last_used_at_update_failure_does_not_abort_the_upload(self):
+        # Regression guard for a design-review-caught gap: a transient
+        # failure updating last_used_at (e.g. SQLite contention) must
+        # never block or roll back the run upload itself.
+        from django.db.models.query import QuerySet
+
+        with patch.object(QuerySet, 'update', side_effect=Exception('simulated database is busy')):
+            response = self._post()
+
         self.assertEqual(response.status_code, 201, response.content)
         self.assertEqual(Run.objects.count(), 1)
 
@@ -114,6 +215,7 @@ class UploadRunViewTests(TestCase):
             self.url,
             data={'report': 'not valid json{{{', 'manifest': '[]'},
             format='multipart',
+            headers={'Authorization': f'Bearer {self.raw_token}'},
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(Run.objects.count(), 0)
@@ -141,6 +243,7 @@ class UploadRunViewTests(TestCase):
             self.url,
             data={'report': json.dumps(VALID_REPORT), 'manifest': 'not valid json{{{'},
             format='multipart',
+            headers={'Authorization': f'Bearer {self.raw_token}'},
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(Run.objects.count(), 0)
@@ -262,6 +365,7 @@ class ConcurrentUploadTests(TransactionTestCase):
     url = reverse('runs:upload')
 
     def test_concurrent_uploads_never_corrupt_or_interleave(self):
+        _, raw_token = _make_project_and_token()
         report = {
             'tests': [
                 {
@@ -283,6 +387,7 @@ class ConcurrentUploadTests(TransactionTestCase):
                 self.url,
                 data={'report': json.dumps(report), 'manifest': '[]'},
                 format='multipart',
+                headers={'Authorization': f'Bearer {raw_token}'},
             )
             with results_lock:
                 results.append(response.status_code)

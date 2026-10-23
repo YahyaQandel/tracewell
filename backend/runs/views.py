@@ -1,6 +1,7 @@
 import json
 
 from django.db import OperationalError, transaction
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -9,6 +10,7 @@ from rest_framework.views import APIView
 from runs.models import Attachment, Attempt, Run, TestCase
 from runs.parsers import ParseError, parse_upload
 from runs.serializers import RunSerializer
+from tokens.authentication import ApiTokenAuthentication
 
 
 class UploadRunView(APIView):
@@ -18,16 +20,26 @@ class UploadRunView(APIView):
     attachment file is written, and all writes happen inside one
     transaction.atomic() block, so a failure never leaves a partial Run.
 
-    TW-22 made IsAuthenticated the project-wide DRF default. This endpoint
-    is what `npx tracewell upload` hits from CI with no login flow of its
-    own, and must stay unauthenticated - explicit empty overrides here,
-    not an omission.
+    Auth: TW-26 gives this a real credential (ApiTokenAuthentication,
+    Bearer <token>). permission_classes stays AllowAny deliberately - no
+    role/membership check is needed here, a valid project-scoped token IS
+    the authorization (the client isn't a logged-in org member, it's a CI
+    job holding a project secret). But the view itself must still require
+    SOME authenticator to have succeeded, since AllowAny alone would let
+    a header-less request through with request.auth=None - see the
+    explicit check in post() below. This replaces the TW-22-era setup
+    that left this endpoint fully unauthenticated; that reasoning no
+    longer holds now a real CI credential exists.
     """
     parser_classes = [MultiPartParser]
-    authentication_classes = []
+    authentication_classes = [ApiTokenAuthentication]
     permission_classes = [AllowAny]
 
     def post(self, request):
+        if request.auth is None:
+            raise AuthenticationFailed('Authentication credentials were not provided.')
+        project = request.auth.project
+
         report_raw = request.data.get('report')
         manifest_raw = request.data.get('manifest', '[]')
 
@@ -53,9 +65,13 @@ class UploadRunView(APIView):
 
         branch = request.data.get('branch') or None
         commit_sha = request.data.get('commit') or None
-        # `project` (request.data.get('project')) is accepted implicitly by
-        # being present in multipart form data and otherwise ignored - no
-        # Project model exists yet (design.md: out of scope for this ticket).
+        # A client-sent `project` field (request.data.get('project')) is
+        # never read for scoping purposes - the authenticated token's own
+        # project (resolved above) determines where the run belongs, full
+        # stop. A token scoped to project A can never create a run under
+        # project B no matter what string the client sends; this is
+        # strictly safer than trusting a client-supplied value and one
+        # fewer thing to validate.
 
         # The CLI sends every attachment under the literal, repeated field
         # name "attachment[]" (buildMultipartRequest.ts) - there is no
@@ -74,7 +90,7 @@ class UploadRunView(APIView):
 
         try:
             with transaction.atomic():
-                run = Run.objects.create(branch=branch, commit_sha=commit_sha)
+                run = Run.objects.create(project=project, branch=branch, commit_sha=commit_sha)
 
                 for parsed_test in parsed.tests:
                     test_case = TestCase.objects.create(

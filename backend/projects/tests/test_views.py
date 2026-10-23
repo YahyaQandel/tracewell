@@ -273,3 +273,64 @@ class ListProjectsTests(TestCase):
         body = response.json()
         self.assertEqual(len(body), 1)
         self.assertEqual(body[0]['slug'], 'frontend')
+
+    def test_latest_run_reflects_a_real_uploaded_run(self):
+        # TW-26 closes #36: Run.project is now a real FK, so latest_run
+        # should stop being hardcoded None once a run actually exists.
+        from runs.models import Run
+
+        alice = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=alice, role='owner')
+        project = Project.objects.create(organization=org, name='Frontend', slug='frontend')
+        older_run = Run.objects.create(project=project)
+        newer_run = Run.objects.create(project=project)
+        self.client.force_login(alice)
+
+        response = self.client.get(_projects_url(org.id))
+
+        body = response.json()
+        self.assertEqual(body[0]['latest_run'], str(newer_run.id))
+
+    def test_latest_run_breaks_ties_on_id_when_timestamps_match(self):
+        # Regression test for a code-review-caught determinism gap:
+        # order_by('-uploaded_at') alone has no secondary key, so two
+        # runs sharing a timestamp (plausible under SQLite's coarser
+        # datetime resolution on fast concurrent uploads) could pick
+        # nondeterministically between them as "latest".
+        from unittest.mock import patch
+
+        from django.utils import timezone
+        from runs.models import Run
+
+        alice = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=alice, role='owner')
+        project = Project.objects.create(organization=org, name='Frontend', slug='frontend')
+        fixed_time = timezone.now()
+        with patch('django.utils.timezone.now', return_value=fixed_time):
+            older_run = Run.objects.create(project=project)
+            newer_run = Run.objects.create(project=project)
+        self.assertEqual(older_run.uploaded_at, newer_run.uploaded_at)
+        self.client.force_login(alice)
+
+        response = self.client.get(_projects_url(org.id))
+
+        self.assertEqual(response.json()[0]['latest_run'], str(newer_run.id))
+
+    def test_latest_run_does_not_leak_a_run_from_another_project(self):
+        from runs.models import Run
+
+        alice = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=alice, role='owner')
+        project_a = Project.objects.create(organization=org, name='Frontend', slug='frontend')
+        project_b = Project.objects.create(organization=org, name='Backend', slug='backend')
+        Run.objects.create(project=project_b)
+        self.client.force_login(alice)
+
+        response = self.client.get(_projects_url(org.id))
+
+        by_slug = {entry['slug']: entry for entry in response.json()}
+        self.assertIsNone(by_slug['frontend']['latest_run'])
+        self.assertIsNotNone(by_slug['backend']['latest_run'])

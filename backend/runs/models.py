@@ -2,6 +2,8 @@ import uuid
 
 from django.db import models
 
+from projects.models import Project
+
 
 def attachment_upload_path(instance, filename):
     run_id = instance.attempt.test_case.run_id
@@ -10,6 +12,10 @@ def attachment_upload_path(instance, filename):
 
 class Run(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey(
+        Project, related_name='runs', on_delete=models.CASCADE,
+        null=True, blank=True,
+    )
     branch = models.CharField(max_length=255, null=True, blank=True)
     commit_sha = models.CharField(max_length=40, null=True, blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)

@@ -10,6 +10,19 @@ class RunModelTests(TestCase):
         self.assertIsNone(run.branch)
         self.assertIsNone(run.commit_sha)
 
+    def test_project_defaults_to_none(self):
+        run = Run.objects.create()
+        self.assertIsNone(run.project)
+
+    def test_project_can_be_set(self):
+        from organizations.models import Organization
+        from projects.models import Project
+
+        org = Organization.objects.create(name='Acme')
+        project = Project.objects.create(organization=org, name='Widgets', slug='widgets')
+        run = Run.objects.create(project=project)
+        self.assertEqual(run.project, project)
+
     def test_id_is_a_uuid_assigned_without_a_db_round_trip(self):
         run = Run()
         self.assertIsNotNone(run.id)

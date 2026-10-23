@@ -28,10 +28,8 @@ class ProjectListSerializer(serializers.ModelSerializer):
         return self.context.get('member_count', 0)
 
     def get_latest_run(self, project):
-        # Always None: Run (backend/runs/models.py) has no FK to Project
-        # yet - TW-2's upload endpoint accepts an optional `project`
-        # field from the CLI (buildMultipartRequest.ts) but never
-        # persists it. Wiring that up is a separate follow-up ticket
-        # (Run-to-Project linkage), out of scope for #24 (project
-        # listing/switching, not run attribution).
-        return None
+        # TW-26 (#36): Run.project is now a real FK. The view computes
+        # the latest run per project in one query (not N+1) and passes
+        # the map in via context - this just looks it up.
+        run = self.context.get('latest_run_by_project_id', {}).get(project.id)
+        return str(run.id) if run is not None else None

@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'accounts',
     'projects',
     'invitations',
+    'tokens',
 ]
 
 REST_FRAMEWORK = {
