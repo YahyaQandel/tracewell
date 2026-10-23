@@ -470,6 +470,26 @@ class RunListViewTests(TestCase):
         self.assertEqual(body[0]['failed_count'], 0)
         self.assertEqual(body[0]['flaky_count'], 0)
 
+    def test_skipped_test_cases_are_counted(self):
+        # Zero coverage for skipped_count before this test (flagged by
+        # fresh-session code review on PR #45) - passed/failed/flaky all
+        # had dedicated assertions, skipped had none.
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(
+            project,
+            [('passed', [10]), ('skipped', [0])],
+        )
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id))
+
+        body = response.json()
+        self.assertEqual(body[0]['status'], 'passed')
+        self.assertEqual(body[0]['passed_count'], 1)
+        self.assertEqual(body[0]['skipped_count'], 1)
+        self.assertEqual(body[0]['failed_count'], 0)
+        self.assertEqual(body[0]['flaky_count'], 0)
+
     def test_failed_takes_precedence_over_flaky_on_the_same_run(self):
         # Precedence test: both outcomes present on the SAME run - must
         # not just test each status in isolation.
