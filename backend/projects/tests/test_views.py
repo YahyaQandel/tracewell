@@ -184,3 +184,92 @@ class SlugPreviewTests(TestCase):
         response = self.client.get(_slug_preview_url(org.id), {'name': ''})
 
         self.assertEqual(response.status_code, 400)
+
+
+class ListProjectsTests(TestCase):
+    def test_unauthenticated_get_gets_403_not_404(self):
+        org = Organization.objects.create(name='Acme')
+        response = self.client.get(_projects_url(org.id))
+        self.assertEqual(response.status_code, 403)
+
+    def test_non_member_gets_404_not_403(self):
+        outsider = User.objects.create_user(username='outsider', password='pw')
+        org = Organization.objects.create(name='Acme')
+        self.client.force_login(outsider)
+
+        response = self.client.get(_projects_url(org.id))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_nonexistent_organization_also_gets_404(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        self.client.force_login(member)
+
+        response = self.client.get(_projects_url('00000000-0000-0000-0000-000000000000'))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_empty_organization_returns_200_with_empty_list(self):
+        member = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=member, role='owner')
+        self.client.force_login(member)
+
+        response = self.client.get(_projects_url(org.id))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_lists_all_projects_with_member_count_and_null_latest_run(self):
+        alice = User.objects.create_user(username='alice', password='pw')
+        bob = User.objects.create_user(username='bob', password='pw')
+        org = Organization.objects.create(name='Acme')
+        OrganizationMembership.objects.create(organization=org, user=alice, role='owner')
+        OrganizationMembership.objects.create(organization=org, user=bob, role='member')
+        project_a = Project.objects.create(organization=org, name='Frontend', slug='frontend')
+        project_b = Project.objects.create(organization=org, name='Backend', slug='backend')
+        self.client.force_login(alice)
+
+        response = self.client.get(_projects_url(org.id))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(len(body), 2)
+        by_slug = {entry['slug']: entry for entry in body}
+        self.assertEqual(by_slug['frontend']['id'], str(project_a.id))
+        self.assertEqual(by_slug['frontend']['name'], 'Frontend')
+        self.assertEqual(by_slug['frontend']['member_count'], 2)
+        self.assertIsNone(by_slug['frontend']['latest_run'])
+        self.assertEqual(by_slug['backend']['member_count'], 2)
+        self.assertIsNone(by_slug['backend']['latest_run'])
+
+    def test_member_count_reflects_organization_not_other_organizations(self):
+        alice = User.objects.create_user(username='alice', password='pw')
+        bob = User.objects.create_user(username='bob', password='pw')
+        org = Organization.objects.create(name='Acme')
+        other_org = Organization.objects.create(name='Other Co')
+        OrganizationMembership.objects.create(organization=org, user=alice, role='owner')
+        OrganizationMembership.objects.create(organization=other_org, user=bob, role='owner')
+        Project.objects.create(organization=org, name='Frontend', slug='frontend')
+        self.client.force_login(alice)
+
+        response = self.client.get(_projects_url(org.id))
+
+        body = response.json()
+        self.assertEqual(body[0]['member_count'], 1)
+
+    def test_only_lists_projects_in_the_requested_organization(self):
+        alice = User.objects.create_user(username='alice', password='pw')
+        org = Organization.objects.create(name='Acme')
+        other_org = Organization.objects.create(name='Other Co')
+        OrganizationMembership.objects.create(organization=org, user=alice, role='owner')
+        OrganizationMembership.objects.create(organization=other_org, user=alice, role='owner')
+        Project.objects.create(organization=org, name='Frontend', slug='frontend')
+        Project.objects.create(organization=other_org, name='Unrelated', slug='unrelated')
+        self.client.force_login(alice)
+
+        response = self.client.get(_projects_url(org.id))
+
+        body = response.json()
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]['slug'], 'frontend')
