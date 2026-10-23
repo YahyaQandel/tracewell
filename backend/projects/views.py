@@ -53,10 +53,14 @@ class ProjectListCreateView(OrganizationScopedView):
         # One query for every project in this org, ordered so the first
         # row per project_id encountered is the latest - avoids N+1 the
         # same way member_count does (single query, not one per project).
+        # -id as a tiebreaker: uploaded_at has SQLite's coarser datetime
+        # resolution, so two fast concurrent uploads could tie on
+        # timestamp - without a secondary key, "latest" would pick
+        # nondeterministically between them (flagged by code review).
         latest_run_by_project_id = {}
         for run in Run.objects.filter(
             project__organization_id=organization_id,
-        ).order_by('project_id', '-uploaded_at'):
+        ).order_by('project_id', '-uploaded_at', '-id'):
             latest_run_by_project_id.setdefault(run.project_id, run)
 
         serializer = ProjectListSerializer(
