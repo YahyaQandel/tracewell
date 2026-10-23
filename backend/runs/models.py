@@ -49,6 +49,14 @@ class Attempt(models.Model):
     attempt_number = models.PositiveIntegerField()
     status = models.CharField(max_length=16, choices=STATUS_CHOICES)
     duration_ms = models.PositiveIntegerField()
+    # Nullable until #51 (CLI parser never reads Playwright's errors[]
+    # field today, see parseResult() in cli/src/report/parseReport.ts) -
+    # every row is null until that fix ships real data. TextField (not
+    # CharField) for message/stack since stack traces are unbounded.
+    error_message = models.TextField(null=True, blank=True)
+    error_stack = models.TextField(null=True, blank=True)
+    error_file = models.CharField(max_length=1024, null=True, blank=True)
+    error_line = models.PositiveIntegerField(null=True, blank=True)
 
 
 class Attachment(models.Model):
