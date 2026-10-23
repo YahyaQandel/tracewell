@@ -94,7 +94,9 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        # Defaults to BASE_DIR for local/test runs; infra/main.tf mounts
+        # the GCS FUSE volume at /data in production, set via DJANGO_DB_PATH.
+        'NAME': os.environ.get('DJANGO_DB_PATH', str(BASE_DIR / 'db.sqlite3')),
         # AC3 (no cross-run corruption under concurrent uploads): SQLite
         # serializes concurrent writers via locking, but only waits for a
         # lock if a busy timeout is configured — Django's SQLite default
@@ -145,7 +147,7 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 MEDIA_URL = 'media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_ROOT = os.environ.get('DJANGO_MEDIA_ROOT', str(BASE_DIR / 'media'))
 
 # Base URL of the Tracewell frontend dashboard - used only to build the
 # `url` a run is reachable at in API responses. The frontend itself is not

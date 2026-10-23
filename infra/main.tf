@@ -101,12 +101,36 @@ resource "google_cloud_run_v2_service" "tracewell" {
     containers {
       image = var.placeholder_image
 
+      ports {
+        container_port = 8080
+      }
+
       resources {
         limits = {
           cpu    = "1"
           memory = "512Mi"
         }
         cpu_idle = true
+      }
+
+      env {
+        name  = "DJANGO_DB_PATH"
+        value = "/data/db.sqlite3"
+      }
+
+      env {
+        name  = "DJANGO_MEDIA_ROOT"
+        value = "/data/media"
+      }
+
+      env {
+        name  = "DJANGO_ALLOWED_HOSTS"
+        value = "*"
+      }
+
+      env {
+        name  = "DJANGO_DEBUG"
+        value = "false"
       }
 
       volume_mounts {
