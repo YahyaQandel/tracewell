@@ -3,6 +3,15 @@ provider "google" {
   region  = var.region
 }
 
+# Real Django SECRET_KEY for production - generated once, stored only in
+# Terraform state (local, gitignored) and passed to Cloud Run as a plain
+# env var. Not in Secret Manager: this project's scale doesn't justify
+# the extra API/IAM surface yet: see infra/README.md's cost section.
+resource "random_password" "django_secret_key" {
+  length  = 50
+  special = true
+}
+
 # --- APIs -------------------------------------------------------------
 
 resource "google_project_service" "run" {
@@ -131,6 +140,11 @@ resource "google_cloud_run_v2_service" "tracewell" {
       env {
         name  = "DJANGO_DEBUG"
         value = "false"
+      }
+
+      env {
+        name  = "DJANGO_SECRET_KEY"
+        value = random_password.django_secret_key.result
       }
 
       volume_mounts {
