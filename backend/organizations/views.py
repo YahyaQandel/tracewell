@@ -94,15 +94,18 @@ class MembershipDetailView(OrganizationScopedView):
 
         if target.role == 'owner' and new_role != 'owner':
             try:
-                _assert_not_last_owner(organization_id, exclude_membership_id=target.id)
+                with transaction.atomic():
+                    _assert_not_last_owner(organization_id, exclude_membership_id=target.id)
+                    target.role = new_role
+                    target.save(update_fields=['role'])
             except LastOwnerError:
                 return Response(
                     {'role': ['Cannot change the role of the organization\'s last remaining owner.']},
                     status=400,
                 )
-
-        target.role = new_role
-        target.save(update_fields=['role'])
+        else:
+            target.role = new_role
+            target.save(update_fields=['role'])
         return Response(OrganizationMembershipSerializer(target).data)
 
     def delete(self, request, organization_id, membership_id):
@@ -112,19 +115,29 @@ class MembershipDetailView(OrganizationScopedView):
         target = get_object_or_404(OrganizationMembership, id=membership_id, organization_id=organization_id)
         if target.role == 'owner':
             try:
-                _assert_not_last_owner(organization_id, exclude_membership_id=target.id)
+                with transaction.atomic():
+                    _assert_not_last_owner(organization_id, exclude_membership_id=target.id)
+                    target.delete()
             except LastOwnerError:
                 return Response(
                     {'role': ['Cannot remove the organization\'s last remaining owner.']},
                     status=400,
                 )
-
-        target.delete()
+        else:
+            target.delete()
         return Response(status=204)
 
 
 def _assert_not_last_owner(organization_id, exclude_membership_id):
-    remaining_owners = OrganizationMembership.objects.filter(
+    """Must be called inside a transaction.atomic() block that also holds
+    the lock taken below for the rest of its duration (i.e. the actual
+    role-change/delete must happen before the transaction commits) - this
+    function only takes the lock, it doesn't hold it past its own return.
+    Without a surrounding atomic()+this lock, two concurrent requests can
+    each see the other owner as "remaining," both pass, and both commit,
+    leaving zero owners with no recovery path (the race this exists to
+    prevent)."""
+    remaining_owners = OrganizationMembership.objects.select_for_update().filter(
         organization_id=organization_id, role='owner',
     ).exclude(id=exclude_membership_id).count()
     if remaining_owners == 0:

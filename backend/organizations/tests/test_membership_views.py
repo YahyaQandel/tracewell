@@ -1,5 +1,7 @@
+import threading
+
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.urls import reverse
 
 from organizations.models import Organization, OrganizationMembership
@@ -116,6 +118,74 @@ class RemoveMemberTests(TestCase):
 
         self.assertEqual(response.status_code, 204)
         self.assertFalse(OrganizationMembership.objects.filter(id=membership.id).exists())
+
+
+class LastOwnerGuardConcurrencyTests(TransactionTestCase):
+    """Regression test for a code-review-caught TOCTOU race: two owners,
+    each concurrently demoting/removing the other, could previously both
+    pass the "am I the last owner" check before either mutation committed
+    (the check and the mutation weren't in the same locked transaction),
+    leaving the organization with zero owners and no recovery path.
+
+    Uses TransactionTestCase (not TestCase) for the same reason as
+    runs/tests/test_views.py's ConcurrentUploadTests: TestCase wraps each
+    test in a transaction that rolls back at the end, which would hide a
+    real cross-thread transaction interaction.
+
+    SQLite has no real row-level locking - select_for_update() escalates
+    to a table-level write lock, so the losing thread can surface as
+    either a clean 400 (if it reaches the application-level check) or a
+    raw `database is locked` OperationalError (if SQLite's own lock wins
+    the race first). Either outcome means the invariant held: the point
+    of this test is that the two concurrent demotions must NEVER both
+    succeed (status 200) - never that the loser's exact error shape is
+    deterministic under SQLite's coarser locking. See issue #34 for the
+    same SQLite-concurrency caveat already tracked on this codebase's
+    other concurrent-write test.
+    """
+
+    def test_concurrent_demotion_of_both_owners_rejects_exactly_one(self):
+        owner_a = User.objects.create_user(username='owner-a', password='pw')
+        owner_b = User.objects.create_user(username='owner-b', password='pw')
+        org = Organization.objects.create(name='Acme')
+        membership_a = OrganizationMembership.objects.create(organization=org, user=owner_a, role='owner')
+        membership_b = OrganizationMembership.objects.create(organization=org, user=owner_b, role='owner')
+
+        results = []
+        results_lock = threading.Lock()
+
+        def demote(acting_user, target_membership):
+            from django.test import Client
+            try:
+                client = Client()
+                client.force_login(acting_user)
+                response = client.patch(
+                    _membership_url(org.id, target_membership.id),
+                    {'role': 'member'},
+                    content_type='application/json',
+                )
+                status = response.status_code
+            except Exception as e:
+                status = f'error: {e!r}'
+            with results_lock:
+                results.append(status)
+
+        threads = [
+            threading.Thread(target=demote, args=(owner_a, membership_b)),
+            threading.Thread(target=demote, args=(owner_b, membership_a)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        successes = [r for r in results if r == 200]
+        self.assertLessEqual(
+            len(successes), 1,
+            f'at most one of the two concurrent demotions may succeed, got {results}',
+        )
+        remaining_owners = OrganizationMembership.objects.filter(organization_id=org.id, role='owner').count()
+        self.assertGreaterEqual(remaining_owners, 1, 'organization must never end up with zero owners')
 
     def test_admin_cannot_remove_members(self):
         admin = User.objects.create_user(username='admin', password='pw')
