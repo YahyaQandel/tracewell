@@ -16,6 +16,7 @@ class Organization(models.Model):
 class OrganizationMembership(models.Model):
     ROLE_CHOICES = [
         ('owner', 'owner'),
+        ('admin', 'admin'),
         ('member', 'member'),
     ]
 

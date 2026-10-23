@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'organizations',
     'accounts',
     'projects',
+    'invitations',
 ]
 
 REST_FRAMEWORK = {
@@ -157,8 +158,4 @@ FRONTEND_BASE_URL = os.environ.get('FRONTEND_BASE_URL', 'http://localhost:5173')
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
-}
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'

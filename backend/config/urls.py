@@ -17,10 +17,14 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
+from invitations.views import InvitationAcceptView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('runs.urls')),
     path('api/organizations/', include('organizations.urls')),
     path('api/organizations/<uuid:organization_id>/projects/', include('projects.urls')),
+    path('api/organizations/<uuid:organization_id>/invitations/', include('invitations.urls')),
+    path('api/invitations/accept/', InvitationAcceptView.as_view(), name='invitation-accept'),
     path('api/auth/', include('accounts.urls')),
 ]
