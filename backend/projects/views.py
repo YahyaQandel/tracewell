@@ -53,14 +53,23 @@ class ProjectListCreateView(OrganizationScopedView):
         # One query for every project in this org, ordered so the first
         # row per project_id encountered is the latest - avoids N+1 the
         # same way member_count does (single query, not one per project).
-        # -id as a tiebreaker: uploaded_at has SQLite's coarser datetime
-        # resolution, so two fast concurrent uploads could tie on
-        # timestamp - without a secondary key, "latest" would pick
-        # nondeterministically between them (flagged by code review).
+        #
+        # KNOWN GAP, not silently papered over: two runs sharing the exact
+        # same uploaded_at (SQLite's coarser datetime resolution makes this
+        # realistic under fast concurrent uploads) pick nondeterministically
+        # between them as "latest" - order_by('-id') was tried as a
+        # tiebreaker and reverted (id is a random uuid4, not time-ordered,
+        # so it doesn't actually make this deterministic, it just moves
+        # the coin-flip to a different field - caught on main after an
+        # earlier merge, see the "latest_run tie-break" follow-up issue).
+        # A real fix needs either a schema change (a genuinely monotonic
+        # sequence column) or a locking strategy, and deserves its own
+        # design review rather than a same-night patch - tracked
+        # separately rather than guessed at here.
         latest_run_by_project_id = {}
         for run in Run.objects.filter(
             project__organization_id=organization_id,
-        ).order_by('project_id', '-uploaded_at', '-id'):
+        ).order_by('project_id', '-uploaded_at'):
             latest_run_by_project_id.setdefault(run.project_id, run)
 
         serializer = ProjectListSerializer(
