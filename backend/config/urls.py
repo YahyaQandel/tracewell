@@ -27,4 +27,5 @@ urlpatterns = [
     path('api/organizations/<uuid:organization_id>/invitations/', include('invitations.urls')),
     path('api/invitations/accept/', InvitationAcceptView.as_view(), name='invitation-accept'),
     path('api/auth/', include('accounts.urls')),
+    path('api/projects/<uuid:project_id>/tokens/', include('tokens.urls')),
 ]
