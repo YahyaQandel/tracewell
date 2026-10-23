@@ -779,3 +779,179 @@ class RunListFilterTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+
+
+def _run_detail_url(run_id):
+    return reverse('runs:detail', kwargs={'run_id': run_id})
+
+
+class RunDetailViewTests(TestCase):
+    def test_returns_header_fields_and_nested_test_cases(self):
+        org, project, member = _make_org_project_member()
+        run = _make_run_with_test_cases(
+            project, [('passed', [100])], branch='main', commit_sha='abc123',
+        )
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body['id'], str(run.id))
+        self.assertEqual(body['branch'], 'main')
+        self.assertEqual(body['commit_sha'], 'abc123')
+        self.assertEqual(body['status'], 'passed')
+        self.assertEqual(body['passed_count'], 1)
+        self.assertEqual(body['failed_count'], 0)
+        self.assertEqual(body['flaky_count'], 0)
+        self.assertEqual(body['skipped_count'], 0)
+        self.assertEqual(body['duration_ms'], 100)
+        self.assertIn('uploaded_at', body)
+        self.assertEqual(len(body['test_cases']), 1)
+        test_case = body['test_cases'][0]
+        self.assertEqual(test_case['outcome'], 'passed')
+        self.assertEqual(len(test_case['attempts']), 1)
+        self.assertEqual(test_case['attempts'][0]['status'], 'passed')
+        self.assertEqual(test_case['attempts'][0]['duration_ms'], 100)
+
+    def test_status_precedence_matches_runs_list(self):
+        # Same precedence test shape as RunListViewTests - must agree
+        # with the badge the runs list already shows for this run.
+        org, project, member = _make_org_project_member()
+        run = _make_run_with_test_cases(
+            project, [('failed', [50]), ('flaky', [60, 70])],
+        )
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        body = response.json()
+        self.assertEqual(body['status'], 'failed')
+        self.assertEqual(body['failed_count'], 1)
+        self.assertEqual(body['flaky_count'], 1)
+
+    def test_test_cases_are_ordered_by_title_not_insertion_order(self):
+        org, project, member = _make_org_project_member()
+        run = Run.objects.create(project=project)
+        # Create out of alphabetical order on purpose.
+        TestCaseModel.objects.create(run=run, title='zebra test', outcome='passed')
+        TestCaseModel.objects.create(run=run, title='alpha test', outcome='passed')
+        TestCaseModel.objects.create(run=run, title='mango test', outcome='passed')
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        titles = [tc['title'] for tc in response.json()['test_cases']]
+        self.assertEqual(titles, ['alpha test', 'mango test', 'zebra test'])
+
+    def test_null_branch_and_commit_sha_serialize_as_null(self):
+        org, project, member = _make_org_project_member()
+        run = _make_run_with_test_cases(project, [('passed', [10])])
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        body = response.json()
+        self.assertIsNone(body['branch'])
+        self.assertIsNone(body['commit_sha'])
+
+    def test_attachments_are_nested_three_levels_deep(self):
+        org, project, member = _make_org_project_member()
+        run = Run.objects.create(project=project)
+        test_case = TestCaseModel.objects.create(run=run, title='test with attachment', outcome='passed')
+        attempt = Attempt.objects.create(test_case=test_case, attempt_number=1, status='passed', duration_ms=10)
+        Attachment.objects.create(
+            attempt=attempt, name='screenshot.png', content_type='image/png',
+            file=SimpleUploadedFile('screenshot.png', b'fake-image-bytes'),
+        )
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        body = response.json()
+        attachments = body['test_cases'][0]['attempts'][0]['attachments']
+        self.assertEqual(len(attachments), 1)
+        self.assertEqual(attachments[0]['name'], 'screenshot.png')
+        self.assertEqual(attachments[0]['content_type'], 'image/png')
+        self.assertIn('file', attachments[0])
+
+    def test_response_never_contains_shard_count_title_or_author(self):
+        # Regression guard for gaps 1/2 (spec.md) - these fields don't
+        # exist as real data anywhere and must never be silently invented
+        # by a future change.
+        org, project, member = _make_org_project_member()
+        run = _make_run_with_test_cases(project, [('passed', [10])])
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        body = response.json()
+        self.assertNotIn('shard_count', body)
+        self.assertNotIn('title', body)
+        self.assertNotIn('author', body)
+
+    def test_non_member_of_project_org_gets_404(self):
+        org, project, member = _make_org_project_member()
+        run = _make_run_with_test_cases(project, [('passed', [10])])
+        outsider = User.objects.create_user(username='outsider', password='pw')
+        self.client.force_login(outsider)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_nonexistent_run_gets_404_same_shape_as_non_member(self):
+        org, project, member = _make_org_project_member()
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url('00000000-0000-0000-0000-000000000000'))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_run_with_no_project_gets_404(self):
+        # Pre-TW-26 edge case: Run.project is nullable. No membership
+        # path exists for a projectless run - must 404, not 500 from
+        # None.organization_id.
+        org, project, member = _make_org_project_member()
+        run = Run.objects.create(project=None)
+        self.client.force_login(member)
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_unauthenticated_request_is_denied(self):
+        org, project, member = _make_org_project_member()
+        run = _make_run_with_test_cases(project, [('passed', [10])])
+
+        response = self.client.get(_run_detail_url(run.id))
+
+        self.assertIn(response.status_code, (401, 403))
+
+    def test_query_count_stays_constant_regardless_of_test_case_count(self):
+        org, project, member = _make_org_project_member()
+
+        def make_run_with_n_test_cases(n):
+            run = Run.objects.create(project=project)
+            for i in range(n):
+                test_case = TestCaseModel.objects.create(run=run, title=f'test {i}', outcome='passed')
+                attempt = Attempt.objects.create(test_case=test_case, attempt_number=1, status='passed', duration_ms=10)
+                Attachment.objects.create(
+                    attempt=attempt, name='a.png', content_type='image/png',
+                    file=SimpleUploadedFile('a.png', b'x'),
+                )
+            return run
+
+        small_run = make_run_with_n_test_cases(1)
+        large_run = make_run_with_n_test_cases(10)
+        self.client.force_login(member)
+
+        with CaptureQueriesContext(connection) as small_ctx:
+            self.client.get(_run_detail_url(small_run.id))
+        with CaptureQueriesContext(connection) as large_ctx:
+            self.client.get(_run_detail_url(large_run.id))
+
+        self.assertEqual(
+            len(small_ctx.captured_queries), len(large_ctx.captured_queries),
+            'query count must not scale with test_case/attempt/attachment count (N+1 check)',
+        )

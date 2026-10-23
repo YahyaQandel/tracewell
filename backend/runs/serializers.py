@@ -69,3 +69,46 @@ class RunListSerializer(serializers.Serializer):
         # this displayed badge can never disagree about the same run's
         # status.
         return status_for(run)
+
+
+class RunDetailSerializer(serializers.Serializer):
+    """GET /api/runs/<run_id>/ response shape - see spec.md. Deliberately
+    NOT RunSerializer (used by UploadRunView's POST response) - that one
+    has no status/counts (the upload response doesn't need a badge) and
+    nests TestCaseSerializer without ordering (insertion order is fine
+    for a one-time upload echo, meaningless for a reader browsing a run
+    days later - see get_test_cases below).
+
+    No shard_count/title/author fields anywhere - that data doesn't
+    exist (see spec.md gaps 1/2). Don't add these as null placeholders
+    either; that would imply a future source that doesn't exist.
+    """
+
+    id = serializers.UUIDField()
+    branch = serializers.CharField(allow_null=True)
+    commit_sha = serializers.CharField(allow_null=True)
+    status = serializers.SerializerMethodField()
+    passed_count = serializers.IntegerField()
+    failed_count = serializers.IntegerField()
+    flaky_count = serializers.IntegerField()
+    skipped_count = serializers.IntegerField()
+    duration_ms = serializers.IntegerField()
+    uploaded_at = serializers.DateTimeField()
+    test_cases = serializers.SerializerMethodField()
+
+    def get_status(self, run):
+        return status_for(run)
+
+    def get_test_cases(self, run):
+        # Flat list, ordered by title (gap 1: no file-grouping data
+        # exists - title is the only deterministic, meaningful order
+        # available; id/insertion order is UUID-random). prefetch_related
+        # collapses the three-level nested serialization (test_cases ->
+        # attempts -> attachments) to 3 queries total regardless of row
+        # count - same N+1 discipline RunListView already applies to its
+        # own aggregate counts, extended one level deeper here since this
+        # view nests three levels, not zero.
+        test_cases = run.test_cases.order_by('title').prefetch_related(
+            'attempts__attachments',
+        )
+        return TestCaseSerializer(test_cases, many=True).data
