@@ -623,3 +623,159 @@ class RunListViewTests(TestCase):
             f'query count must not grow with run count: 5 runs -> {few_query_count} queries, '
             f'10 runs -> {many_query_count} queries',
         )
+
+
+class RunListFilterTests(TestCase):
+    """TW-13: ?status=/?branch=/?search= on GET /api/projects/<id>/runs/."""
+
+    def test_status_filter_returns_only_matching_runs(self):
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(project, [('passed', [10])])
+        failed_run = _make_run_with_test_cases(project, [('failed', [10])])
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id), {'status': 'failed'})
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]['id'], str(failed_run.id))
+
+    def test_status_filter_matches_the_same_precedence_the_badge_shows(self):
+        # A run with both failed and flaky test cases shows 'failed' per
+        # precedence (see test_failed_takes_precedence_over_flaky...) -
+        # the filter must agree: ?status=flaky must NOT match it, and
+        # ?status=failed must.
+        org, project, member = _make_org_project_member()
+        mixed_run = _make_run_with_test_cases(
+            project, [('failed', [10]), ('flaky', [20, 30])],
+        )
+        self.client.force_login(member)
+
+        flaky_response = self.client.get(_runs_url(project.id), {'status': 'flaky'})
+        failed_response = self.client.get(_runs_url(project.id), {'status': 'failed'})
+
+        self.assertEqual(flaky_response.json(), [])
+        self.assertEqual(len(failed_response.json()), 1)
+        self.assertEqual(failed_response.json()[0]['id'], str(mixed_run.id))
+
+    def test_unrecognized_status_value_returns_400_not_empty_list(self):
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(project, [('passed', [10])])
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id), {'status': 'bogus'})
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_branch_filter_excludes_other_branches_and_null_branch(self):
+        org, project, member = _make_org_project_member()
+        main_run = _make_run_with_test_cases(project, [('passed', [10])], branch='main')
+        _make_run_with_test_cases(project, [('passed', [10])], branch='dev')
+        _make_run_with_test_cases(project, [('passed', [10])], branch=None)
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id), {'branch': 'main'})
+
+        body = response.json()
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]['id'], str(main_run.id))
+
+    def test_branch_filter_against_all_null_branches_returns_empty_list_not_error(self):
+        # The "acknowledged-empty data" case from spec.md gap 2 - every
+        # Run.branch is null in practice today since the CLI never sends
+        # one (see #46). Must not crash.
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(project, [('passed', [10])], branch=None)
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id), {'branch': 'main'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_search_matches_commit_sha_case_insensitively(self):
+        org, project, member = _make_org_project_member()
+        matching_run = _make_run_with_test_cases(
+            project, [('passed', [10])], commit_sha='a1b2c3d4',
+        )
+        _make_run_with_test_cases(project, [('passed', [10])], commit_sha='ffffffff')
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id), {'search': 'A1B2'})
+
+        body = response.json()
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]['id'], str(matching_run.id))
+
+    def test_search_against_null_commit_sha_excludes_it_without_error(self):
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(project, [('passed', [10])], commit_sha=None)
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id), {'search': 'anything'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_all_three_filters_combine_with_and_not_or(self):
+        org, project, member = _make_org_project_member()
+        # Satisfies status+branch but not search.
+        _make_run_with_test_cases(
+            project, [('failed', [10])], branch='main', commit_sha='zzzzzzzz',
+        )
+        # Satisfies status+search but not branch.
+        _make_run_with_test_cases(
+            project, [('failed', [10])], branch='dev', commit_sha='a1b2c3d4',
+        )
+        # Satisfies branch+search but not status.
+        _make_run_with_test_cases(
+            project, [('passed', [10])], branch='main', commit_sha='a1b2c3d4',
+        )
+        # Satisfies all three.
+        target_run = _make_run_with_test_cases(
+            project, [('failed', [10])], branch='main', commit_sha='a1b2c3d4',
+        )
+        self.client.force_login(member)
+
+        response = self.client.get(
+            _runs_url(project.id),
+            {'status': 'failed', 'branch': 'main', 'search': 'a1b2'},
+        )
+
+        body = response.json()
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]['id'], str(target_run.id))
+
+    def test_filters_matching_zero_runs_returns_200_empty_list(self):
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(project, [('passed', [10])], branch='main')
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id), {'branch': 'nonexistent-branch'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_omitting_all_filters_matches_unfiltered_behavior(self):
+        org, project, member = _make_org_project_member()
+        run1 = _make_run_with_test_cases(project, [('passed', [10])])
+        run2 = _make_run_with_test_cases(project, [('failed', [10])])
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id))
+
+        ids = {row['id'] for row in response.json()}
+        self.assertEqual(ids, {str(run1.id), str(run2.id)})
+
+    def test_non_member_gets_404_even_with_filters_present(self):
+        org, project, member = _make_org_project_member()
+        outsider = User.objects.create_user(username='outsider', password='pw')
+        self.client.force_login(outsider)
+
+        response = self.client.get(
+            _runs_url(project.id),
+            {'status': 'failed', 'branch': 'main', 'search': 'x'},
+        )
+
+        self.assertEqual(response.status_code, 404)

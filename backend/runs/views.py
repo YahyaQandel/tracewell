@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from projects.views import ProjectScopedView
-from runs.models import Attachment, Attempt, Run, TestCase
+from runs.models import Attachment, Attempt, Run, TestCase, status_for
 from runs.parsers import ParseError, parse_upload
 from runs.serializers import RunListSerializer, RunSerializer
 from tokens.authentication import ApiTokenAuthentication
@@ -153,8 +153,13 @@ class UploadRunView(APIView):
         return Response(response_data, status=201)
 
 
+VALID_STATUSES = {'passed', 'failed', 'flaky'}
+
+
 class RunListView(ProjectScopedView):
     """GET /api/projects/<project_id>/runs/ - run history for a project.
+    Supports ?status=/?branch=/?search= filters (TW-13), all combining
+    with AND semantics when present together.
 
     distinct=True on every Count() is required, not optional: joining
     through test_cases__attempts for the Sum (duration lives two
@@ -165,21 +170,49 @@ class RunListView(ProjectScopedView):
     added. Sum is unaffected by the same fan-out, since summing each
     attempt's own duration once is correct regardless of how many rows
     the join produces. See design.md for the full repro.
+
+    branch/search are real .filter() calls against real columns - no
+    null-guard needed: `branch = 'main'` against a NULL column evaluates
+    to NULL (not true) in standard SQL, correctly excluding it without
+    erroring, same for `commit_sha__icontains`. This is why every
+    Run.branch is null today (the CLI never sends one - see #46):
+    filtering still works correctly, it just has nothing real to match
+    against yet.
     """
 
     def get(self, request, project_id):
         project = self._require_project_membership(request, project_id)
 
-        runs = (
-            Run.objects.filter(project=project)
-            .annotate(
-                passed_count=Count('test_cases', filter=Q(test_cases__outcome='passed'), distinct=True),
-                failed_count=Count('test_cases', filter=Q(test_cases__outcome='failed'), distinct=True),
-                flaky_count=Count('test_cases', filter=Q(test_cases__outcome='flaky'), distinct=True),
-                skipped_count=Count('test_cases', filter=Q(test_cases__outcome='skipped'), distinct=True),
-                duration_ms=Coalesce(Sum('test_cases__attempts__duration_ms'), 0),
+        status_param = request.query_params.get('status')
+        if status_param is not None and status_param not in VALID_STATUSES:
+            return Response(
+                {'status': [f'must be one of: {", ".join(sorted(VALID_STATUSES))}']},
+                status=400,
             )
-            .order_by('-uploaded_at')
+
+        runs = Run.objects.filter(project=project).annotate(
+            passed_count=Count('test_cases', filter=Q(test_cases__outcome='passed'), distinct=True),
+            failed_count=Count('test_cases', filter=Q(test_cases__outcome='failed'), distinct=True),
+            flaky_count=Count('test_cases', filter=Q(test_cases__outcome='flaky'), distinct=True),
+            skipped_count=Count('test_cases', filter=Q(test_cases__outcome='skipped'), distinct=True),
+            duration_ms=Coalesce(Sum('test_cases__attempts__duration_ms'), 0),
         )
+
+        branch_param = request.query_params.get('branch')
+        if branch_param is not None:
+            runs = runs.filter(branch=branch_param)
+
+        search_param = request.query_params.get('search')
+        if search_param is not None:
+            runs = runs.filter(commit_sha__icontains=search_param)
+
+        runs = runs.order_by('-uploaded_at')
+
+        if status_param is not None:
+            # Derived value, not a column - can't push into .filter().
+            # Applied last, in Python, on the already-DB-narrowed result
+            # set so this only ever evaluates the rows that already
+            # passed branch/search, not the full unfiltered table.
+            runs = [run for run in runs if status_for(run) == status_param]
 
         return Response(RunListSerializer(runs, many=True).data)
