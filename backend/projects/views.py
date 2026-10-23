@@ -1,33 +1,11 @@
 from django.db import IntegrityError, transaction
-from django.http import Http404
 from rest_framework.response import Response
-from rest_framework.views import APIView
 
 from organizations.models import OrganizationMembership
+from organizations.views import OrganizationScopedView
 from projects.models import Project
 from projects.serializers import ProjectListSerializer, ProjectSerializer
 from projects.slugs import slugify_project_name
-
-
-class OrganizationScopedView(APIView):
-    """Shared membership gate for every endpoint nested under
-    /api/organizations/<organization_id>/.
-
-    Collapses "organization doesn't exist" and "organization exists but
-    you're not a member" to the same 404 - returning 403 for the second
-    case would let an authenticated user enumerate which organization
-    IDs are real by watching for a 403-vs-404 split, which is exactly
-    the kind of leak a multi-tenant app (this epic's whole reason for
-    existing) must not have.
-    """
-
-    def _require_membership(self, request, organization_id):
-        membership = OrganizationMembership.objects.filter(
-            organization_id=organization_id, user=request.user,
-        ).first()
-        if membership is None:
-            raise Http404
-        return membership
 
 
 class ProjectListCreateView(OrganizationScopedView):

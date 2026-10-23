@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from organizations.models import Organization
+from organizations.models import Organization, OrganizationMembership
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -16,6 +16,12 @@ class OrganizationSerializer(serializers.ModelSerializer):
         # (per-request-user role lives on the membership row, not on
         # Organization itself - see design.md).
         return getattr(organization, 'requesting_user_role', None)
+
+
+class OrganizationMembershipSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrganizationMembership
+        fields = ['id', 'organization', 'user', 'role']
 
 
 class CreateOrganizationSerializer(serializers.ModelSerializer):

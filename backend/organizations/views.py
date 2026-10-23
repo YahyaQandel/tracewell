@@ -1,9 +1,44 @@
 from django.db import transaction
+from django.http import Http404
+from django.shortcuts import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from organizations.exceptions import LastOwnerError
 from organizations.models import Organization, OrganizationMembership
-from organizations.serializers import CreateOrganizationSerializer, OrganizationSerializer
+from organizations.permissions import require_role
+from organizations.serializers import (
+    CreateOrganizationSerializer,
+    OrganizationMembershipSerializer,
+    OrganizationSerializer,
+)
+
+
+class OrganizationScopedView(APIView):
+    """Shared membership gate for every endpoint nested under
+    /api/organizations/<organization_id>/.
+
+    Collapses "organization doesn't exist" and "organization exists but
+    you're not a member" to the same 404 - returning 403 for the second
+    case would let an authenticated user enumerate which organization
+    IDs are real by watching for a 403-vs-404 split, which is exactly
+    the kind of leak a multi-tenant app (this epic's whole reason for
+    existing) must not have.
+
+    Relocated here from projects/views.py (TW-23) in TW-25: organizations
+    is this codebase's dependency root (projects/models.py imports from
+    organizations.models, never the reverse), so a shared org-membership
+    gate belongs here, not in a leaf app - see design.md's "OrganizationScopedView
+    relocation" section for the full rationale.
+    """
+
+    def _require_membership(self, request, organization_id):
+        membership = OrganizationMembership.objects.filter(
+            organization_id=organization_id, user=request.user,
+        ).first()
+        if membership is None:
+            raise Http404
+        return membership
 
 
 class OrganizationListCreateView(APIView):
@@ -45,3 +80,52 @@ class OrganizationListCreateView(APIView):
         organization.requesting_user_role = 'owner'
         serializer = OrganizationSerializer(organization)
         return Response(serializer.data, status=201)
+
+
+class MembershipDetailView(OrganizationScopedView):
+    def patch(self, request, organization_id, membership_id):
+        membership = self._require_membership(request, organization_id)
+        require_role(membership, 'owner')
+
+        target = get_object_or_404(OrganizationMembership, id=membership_id, organization_id=organization_id)
+        new_role = request.data.get('role')
+        if new_role not in ('owner', 'admin', 'member'):
+            return Response({'role': ['Must be one of owner, admin, member.']}, status=400)
+
+        if target.role == 'owner' and new_role != 'owner':
+            try:
+                _assert_not_last_owner(organization_id, exclude_membership_id=target.id)
+            except LastOwnerError:
+                return Response(
+                    {'role': ['Cannot change the role of the organization\'s last remaining owner.']},
+                    status=400,
+                )
+
+        target.role = new_role
+        target.save(update_fields=['role'])
+        return Response(OrganizationMembershipSerializer(target).data)
+
+    def delete(self, request, organization_id, membership_id):
+        membership = self._require_membership(request, organization_id)
+        require_role(membership, 'owner')
+
+        target = get_object_or_404(OrganizationMembership, id=membership_id, organization_id=organization_id)
+        if target.role == 'owner':
+            try:
+                _assert_not_last_owner(organization_id, exclude_membership_id=target.id)
+            except LastOwnerError:
+                return Response(
+                    {'role': ['Cannot remove the organization\'s last remaining owner.']},
+                    status=400,
+                )
+
+        target.delete()
+        return Response(status=204)
+
+
+def _assert_not_last_owner(organization_id, exclude_membership_id):
+    remaining_owners = OrganizationMembership.objects.filter(
+        organization_id=organization_id, role='owner',
+    ).exclude(id=exclude_membership_id).count()
+    if remaining_owners == 0:
+        raise LastOwnerError()
