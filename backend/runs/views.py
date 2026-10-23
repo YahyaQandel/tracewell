@@ -1,15 +1,18 @@
 import json
 
 from django.db import OperationalError, transaction
+from django.db.models import Count, Q, Sum
+from django.db.models.functions import Coalesce
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from projects.views import ProjectScopedView
 from runs.models import Attachment, Attempt, Run, TestCase
 from runs.parsers import ParseError, parse_upload
-from runs.serializers import RunSerializer
+from runs.serializers import RunListSerializer, RunSerializer
 from tokens.authentication import ApiTokenAuthentication
 
 
@@ -148,3 +151,35 @@ class UploadRunView(APIView):
             )
 
         return Response(response_data, status=201)
+
+
+class RunListView(ProjectScopedView):
+    """GET /api/projects/<project_id>/runs/ - run history for a project.
+
+    distinct=True on every Count() is required, not optional: joining
+    through test_cases__attempts for the Sum (duration lives two
+    relations from Run) fans out each TestCase row once per Attempt it
+    has, so an un-distinct'd Count('test_cases', filter=...) overcounts
+    by that fan-out factor. Verified directly: a test case with 2
+    attempts read as 2 flaky test cases, not 1, before distinct=True was
+    added. Sum is unaffected by the same fan-out, since summing each
+    attempt's own duration once is correct regardless of how many rows
+    the join produces. See design.md for the full repro.
+    """
+
+    def get(self, request, project_id):
+        project = self._require_project_membership(request, project_id)
+
+        runs = (
+            Run.objects.filter(project=project)
+            .annotate(
+                passed_count=Count('test_cases', filter=Q(test_cases__outcome='passed'), distinct=True),
+                failed_count=Count('test_cases', filter=Q(test_cases__outcome='failed'), distinct=True),
+                flaky_count=Count('test_cases', filter=Q(test_cases__outcome='flaky'), distinct=True),
+                skipped_count=Count('test_cases', filter=Q(test_cases__outcome='skipped'), distinct=True),
+                duration_ms=Coalesce(Sum('test_cases__attempts__duration_ms'), 0),
+            )
+            .order_by('-uploaded_at')
+        )
+
+        return Response(RunListSerializer(runs, many=True).data)

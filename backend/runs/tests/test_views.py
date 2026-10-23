@@ -2,11 +2,14 @@ import json
 import threading
 from unittest.mock import patch
 
+from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, TransactionTestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from django.db import connection
 
-from organizations.models import Organization
+from organizations.models import Organization, OrganizationMembership
 from projects.models import Project
 from runs.models import Attachment, Attempt, Run, TestCase as TestCaseModel
 from tokens.models import ApiToken, generate_raw_token, hash_token
@@ -416,3 +419,187 @@ class ConcurrentUploadTests(TransactionTestCase):
         for run in Run.objects.all():
             self.assertEqual(run.test_cases.count(), 1)
             self.assertEqual(run.test_cases.get().attempts.count(), 1)
+
+
+def _runs_url(project_id):
+    return reverse('run-list', kwargs={'project_id': project_id})
+
+
+def _make_org_project_member():
+    org = Organization.objects.create(name='Acme')
+    project = Project.objects.create(organization=org, name='Widgets', slug='widgets')
+    member = User.objects.create_user(username='member', password='pw')
+    OrganizationMembership.objects.create(organization=org, user=member, role='owner')
+    return org, project, member
+
+
+def _make_run_with_test_cases(project, outcomes_and_attempt_durations, branch=None, commit_sha=None):
+    """outcomes_and_attempt_durations: list of (outcome, [attempt_durations])."""
+    run = Run.objects.create(project=project, branch=branch, commit_sha=commit_sha)
+    for outcome, durations in outcomes_and_attempt_durations:
+        test_case = TestCaseModel.objects.create(run=run, title=f'test ({outcome})', outcome=outcome)
+        for i, duration in enumerate(durations, start=1):
+            Attempt.objects.create(
+                test_case=test_case, attempt_number=i, status='passed' if outcome != 'failed' else 'failed',
+                duration_ms=duration,
+            )
+    return run
+
+
+class RunListViewTests(TestCase):
+    def test_empty_project_returns_empty_list(self):
+        org, project, member = _make_org_project_member()
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+    def test_run_with_only_passed_test_cases_shows_passed_status(self):
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(project, [('passed', [100])])
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id))
+
+        body = response.json()
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]['status'], 'passed')
+        self.assertEqual(body[0]['passed_count'], 1)
+        self.assertEqual(body[0]['failed_count'], 0)
+        self.assertEqual(body[0]['flaky_count'], 0)
+
+    def test_failed_takes_precedence_over_flaky_on_the_same_run(self):
+        # Precedence test: both outcomes present on the SAME run - must
+        # not just test each status in isolation.
+        org, project, member = _make_org_project_member()
+        run = _make_run_with_test_cases(
+            project,
+            [('failed', [50]), ('flaky', [60, 70])],
+        )
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id))
+
+        body = response.json()
+        self.assertEqual(body[0]['id'], str(run.id))
+        self.assertEqual(body[0]['status'], 'failed')
+        self.assertEqual(body[0]['failed_count'], 1)
+        self.assertEqual(body[0]['flaky_count'], 1)
+
+    def test_flaky_but_no_failed_shows_flaky_status(self):
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(project, [('passed', [10]), ('flaky', [20, 30])])
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id))
+
+        body = response.json()
+        self.assertEqual(body[0]['status'], 'flaky')
+
+    def test_runs_are_ordered_newest_first(self):
+        org, project, member = _make_org_project_member()
+        run1 = _make_run_with_test_cases(project, [('passed', [10])])
+        run2 = _make_run_with_test_cases(project, [('passed', [10])])
+        run3 = _make_run_with_test_cases(project, [('passed', [10])])
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id))
+
+        ids = [row['id'] for row in response.json()]
+        self.assertEqual(ids, [str(run3.id), str(run2.id), str(run1.id)])
+
+    def test_null_branch_and_commit_sha_serialize_as_null(self):
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(project, [('passed', [10])], branch=None, commit_sha=None)
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id))
+
+        body = response.json()
+        self.assertIsNone(body[0]['branch'])
+        self.assertIsNone(body[0]['commit_sha'])
+
+    def test_duration_sums_every_attempt_across_all_test_cases(self):
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(
+            project,
+            [('passed', [100]), ('flaky', [50, 75])],
+        )
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id))
+
+        body = response.json()
+        self.assertEqual(body[0]['duration_ms'], 100 + 50 + 75)
+
+    def test_fan_out_does_not_inflate_counts_when_a_test_case_has_multiple_attempts(self):
+        # The exact case that broke this query during design verification:
+        # one failed test case (1 attempt) and one flaky test case with
+        # 2+ attempts. Without distinct=True on the view's Count() calls,
+        # flaky_count reads 2 instead of 1.
+        org, project, member = _make_org_project_member()
+        _make_run_with_test_cases(
+            project,
+            [('failed', [50]), ('flaky', [10, 20, 30])],
+        )
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url(project.id))
+
+        body = response.json()
+        self.assertEqual(body[0]['failed_count'], 1)
+        self.assertEqual(body[0]['flaky_count'], 1)
+        self.assertEqual(body[0]['duration_ms'], 50 + 10 + 20 + 30)
+
+    def test_non_member_of_project_org_gets_404(self):
+        org, project, member = _make_org_project_member()
+        outsider = User.objects.create_user(username='outsider', password='pw')
+        self.client.force_login(outsider)
+
+        response = self.client.get(_runs_url(project.id))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_nonexistent_project_gets_404_same_shape_as_non_member(self):
+        org, project, member = _make_org_project_member()
+        self.client.force_login(member)
+
+        response = self.client.get(_runs_url('00000000-0000-0000-0000-000000000000'))
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_query_count_stays_constant_regardless_of_run_count(self):
+        org, project, member = _make_org_project_member()
+        self.client.force_login(member)
+
+        for _ in range(5):
+            _make_run_with_test_cases(
+                project,
+                [('passed', [10]), ('failed', [20]), ('flaky', [30, 40])],
+            )
+
+        with CaptureQueriesContext(connection) as ctx_few:
+            response = self.client.get(_runs_url(project.id))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 5)
+        few_query_count = len(ctx_few.captured_queries)
+
+        for _ in range(5):
+            _make_run_with_test_cases(
+                project,
+                [('passed', [10]), ('failed', [20]), ('flaky', [30, 40])],
+            )
+
+        with CaptureQueriesContext(connection) as ctx_many:
+            response = self.client.get(_runs_url(project.id))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 10)
+        many_query_count = len(ctx_many.captured_queries)
+
+        self.assertEqual(
+            few_query_count, many_query_count,
+            f'query count must not grow with run count: 5 runs -> {few_query_count} queries, '
+            f'10 runs -> {many_query_count} queries',
+        )
