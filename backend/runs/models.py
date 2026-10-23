@@ -57,3 +57,21 @@ class Attachment(models.Model):
     name = models.CharField(max_length=512)
     content_type = models.CharField(max_length=255)
     file = models.FileField(upload_to=attachment_upload_path)
+
+
+def status_for(run):
+    """Single source of truth for the failed > flaky > passed precedence
+    on a Run annotated with failed_count/flaky_count (see RunListView's
+    .annotate() in views.py) - called by both RunListView's ?status=
+    filter and RunListSerializer.get_status(), so the filter can never
+    disagree with the badge a run actually displays. Lives here (not in
+    views.py or serializers.py) because both of those modules already
+    import from this one - putting it in either would make the other
+    import backwards. Never returns 'running' - no upload model in this
+    codebase creates a Run before it's fully complete (TW-2's atomic-
+    creation guarantee), so there's nothing to derive that from."""
+    if run.failed_count > 0:
+        return 'failed'
+    if run.flaky_count > 0:
+        return 'flaky'
+    return 'passed'

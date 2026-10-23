@@ -1,7 +1,7 @@
 from django.conf import settings
 from rest_framework import serializers
 
-from runs.models import Attachment, Attempt, Run, TestCase
+from runs.models import Attachment, Attempt, Run, TestCase, status_for
 
 
 class AttachmentSerializer(serializers.ModelSerializer):
@@ -64,15 +64,8 @@ class RunListSerializer(serializers.Serializer):
     uploaded_at = serializers.DateTimeField()
 
     def get_status(self, run):
-        # Precedence per spec.md: failed > flaky > passed. A run with
-        # both failed and flaky test cases shows "failed" - failed is
-        # the more severe signal and must not be masked by flaky also
-        # being present. Never "running" - no upload model in this
-        # codebase today creates a Run before it's fully complete (TW-2's
-        # atomic-creation guarantee), so there is nothing to derive a
-        # "running" status from. See spec.md gap 1.
-        if run.failed_count > 0:
-            return 'failed'
-        if run.flaky_count > 0:
-            return 'flaky'
-        return 'passed'
+        # Shared with RunListView's ?status= filter (TW-13) via
+        # status_for() (runs/models.py) - one function, so the filter and
+        # this displayed badge can never disagree about the same run's
+        # status.
+        return status_for(run)
