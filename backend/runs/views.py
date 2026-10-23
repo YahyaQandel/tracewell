@@ -3,16 +3,19 @@ import json
 from django.db import OperationalError, transaction
 from django.db.models import Count, Q, Sum
 from django.db.models.functions import Coalesce
+from django.http import Http404
+from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from organizations.views import OrganizationScopedView
 from projects.views import ProjectScopedView
 from runs.models import Attachment, Attempt, Run, TestCase, status_for
 from runs.parsers import ParseError, parse_upload
-from runs.serializers import RunListSerializer, RunSerializer
+from runs.serializers import RunDetailSerializer, RunListSerializer, RunSerializer
 from tokens.authentication import ApiTokenAuthentication
 
 
@@ -216,3 +219,47 @@ class RunListView(ProjectScopedView):
             runs = [run for run in runs if status_for(run) == status_param]
 
         return Response(RunListSerializer(runs, many=True).data)
+
+
+class RunDetailView(APIView):
+    """GET /api/runs/<run_id>/ - full detail for one run: header fields,
+    computed status/counts (same status_for() precedence RunListView's
+    ?status= filter and badge use), and every test_case/attempt/
+    attachment nested three levels deep.
+
+    Not an OrganizationScopedView subclass - this URL has a run_id, not
+    an organization_id, so there's nothing to bind the usual class-level
+    gate to. Resolves the run first, then reuses the SAME enumeration-
+    safe membership check via a bare OrganizationScopedView() instance
+    (_require_membership has no self-dependent state - see design.md)
+    rather than writing a second copy of that 404-collapsing logic.
+    """
+
+    def get(self, request, run_id):
+        run = get_object_or_404(
+            Run.objects.select_related('project'), id=run_id,
+        )
+        if run.project is None:
+            # Pre-TW-26 edge case: no project means no organization means
+            # no membership path any non-staff user can ever satisfy.
+            raise Http404
+
+        OrganizationScopedView()._require_membership(request, run.project.organization_id)
+
+        try:
+            run = Run.objects.filter(id=run_id).annotate(
+                passed_count=Count('test_cases', filter=Q(test_cases__outcome='passed'), distinct=True),
+                failed_count=Count('test_cases', filter=Q(test_cases__outcome='failed'), distinct=True),
+                flaky_count=Count('test_cases', filter=Q(test_cases__outcome='flaky'), distinct=True),
+                skipped_count=Count('test_cases', filter=Q(test_cases__outcome='skipped'), distinct=True),
+                duration_ms=Coalesce(Sum('test_cases__attempts__duration_ms'), 0),
+            ).get()
+        except Run.DoesNotExist:
+            # Hardening noted during design review: no delete endpoint
+            # for Run exists anywhere today, so this window isn't
+            # exploitable yet, but .get() raising DoesNotExist here would
+            # otherwise surface as an unhandled 500 rather than a 404 if
+            # that ever changes.
+            raise Http404
+
+        return Response(RunDetailSerializer(run).data)
