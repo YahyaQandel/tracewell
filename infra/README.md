@@ -20,49 +20,49 @@ before either is extended further — don't assume this one wins.
 | GCP project | `steam-kingdom-423821-k2` ("CodeLab Nexus") |
 | Region | `us-central1` |
 | Cloud Run URL | https://tracewell-sxsi7kqutq-uc.a.run.app |
-| Image running there now | `us-docker.pkg.dev/cloudrun/container/hello` (placeholder — see below) |
+| Image running there now | `us-central1-docker.pkg.dev/steam-kingdom-423821-k2/tracewell/backend:latest` — the real Django backend, deployed and live |
 | GCS bucket | `steam-kingdom-423821-k2-tracewell-data` |
 | Artifact Registry repo | `tracewell` (`us-central1-docker.pkg.dev/steam-kingdom-423821-k2/tracewell`) |
 | Runtime service account | `tracewell-run@steam-kingdom-423821-k2.iam.gserviceaccount.com` |
 
-## Why a placeholder image
+## Deploying a new backend image
 
-At the time this infra was provisioned, Tracewell's backend (Django API +
-dashboard) had not been built yet — only the `cli/` uploader existed. The
-Cloud Run service, bucket, IAM, and registry are real and live now so the
-pipeline work (TW-2 onward) has somewhere to deploy to, but the container
-currently serving traffic is GCP's stock `hello` image, not the real app.
+Every time a story merges to `main`, rebuild and redeploy:
 
-**There is no admin login yet** — that depends on the Django backend
-actually shipping an auth/login system (tracked under the Organizations &
-Projects epic). Once that exists, create a superuser and document its
-credentials here (or, better, in a secrets manager — see below).
+```bash
+gcloud auth configure-docker us-central1-docker.pkg.dev
+cd backend
+docker build --platform linux/amd64 -t us-central1-docker.pkg.dev/steam-kingdom-423821-k2/tracewell/backend:latest .
+docker push us-central1-docker.pkg.dev/steam-kingdom-423821-k2/tracewell/backend:latest
+cd ../infra
+GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token --account=yahya.qandel@gmail.com) \
+  terraform apply -var="placeholder_image=us-central1-docker.pkg.dev/steam-kingdom-423821-k2/tracewell/backend:latest"
+```
 
-## Swapping in the real backend
+Cloud Run pulls the image fresh on each `terraform apply` even when the
+tag (`:latest`) doesn't change in the Terraform diff itself — Cloud Run
+resolves `:latest` to its current digest at deploy time, so a rebuilt-
+and-repushed `:latest` does get picked up. The Dockerfile's `CMD` runs
+`python manage.py migrate --noinput` before starting gunicorn, so schema
+migrations apply automatically on every deploy.
 
-1. Build the backend image and push it to the Artifact Registry repo above:
-   ```bash
-   gcloud auth configure-docker us-central1-docker.pkg.dev
-   docker build -t us-central1-docker.pkg.dev/steam-kingdom-423821-k2/tracewell/backend:latest ./backend
-   docker push us-central1-docker.pkg.dev/steam-kingdom-423821-k2/tracewell/backend:latest
-   ```
-2. Point Django's `DATABASES` at `/data/db.sqlite3` and `MEDIA_ROOT` at
-   `/data/media` — the GCS bucket is mounted at `/data` inside the
-   container (see the `volume_mounts` / `volumes` blocks in `main.tf`).
-   SQLite over GCS FUSE has single-writer semantics; this is fine for a
-   low-traffic instance but don't raise `max_instance_count` above 1
-   without moving to Cloud SQL first.
-3. Update `placeholder_image` in a `terraform.tfvars` (or pass
-   `-var`) to the pushed image tag, then:
-   ```bash
-   terraform apply -var="placeholder_image=us-central1-docker.pkg.dev/steam-kingdom-423821-k2/tracewell/backend:latest"
-   ```
-4. Once Django has a working login, create the admin superuser:
-   ```bash
-   gcloud run services update tracewell --region us-central1 \
-     --command="python,manage.py,createsuperuser,--noinput" \
-     --set-env-vars="DJANGO_SUPERUSER_USERNAME=admin,DJANGO_SUPERUSER_EMAIL=you@example.com,DJANGO_SUPERUSER_PASSWORD=<generate one, don't commit it>"
-   ```
+SQLite over GCS FUSE has single-writer semantics (and FUSE's buffered
+writes can emit benign `OutOfOrderError` log lines on the journal file,
+observed during normal operation) — fine for a low-traffic instance, but
+don't raise `max_instance_count` above 1 without moving to Cloud SQL first.
+
+## Admin access
+
+A Django superuser was created via a one-off Cloud Run Job (`gcloud run
+jobs create ... --command python --args manage.py,createsuperuser,--noinput`
+with `DJANGO_SUPERUSER_*` env vars, then `execute`d once and deleted —
+nothing superuser-related is committed here). Log in at
+`https://tracewell-sxsi7kqutq-uc.a.run.app/admin/`; the password was
+shown once at creation time and is not recoverable from this repo — if
+lost, run the same one-off job pattern again with a fresh password to
+reset it (Django's `createsuperuser --noinput` fails if the username
+already exists; use `manage.py changepassword admin` via the same job
+pattern instead to reset without recreating the account).
    Don't commit the generated password to this README — store it in a
    password manager or `gcloud secrets` and note *where* here instead.
 
